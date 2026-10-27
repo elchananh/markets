@@ -1,0 +1,50 @@
+name: deploy-pages
+# Publishes the static site (index.html, assets, icons, data/*.json, PWA files) to GitHub Pages.
+on:
+  push:
+    branches: [main]
+    paths-ignore: ["README.md", ".github/workflows/refresh.yml"]
+  workflow_dispatch:
+  workflow_call:
+    secrets:
+      PRIVACY_PATTERNS:
+        required: false
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+concurrency:
+  group: pages
+  cancel-in-progress: false
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main            # when called after the data refresh, publish the just-committed data
+          fetch-depth: 0       # full history for the privacy gate
+      - name: Assemble site
+        run: |
+          mkdir -p _site/data
+          mkdir -p _site/assets
+          cp index.html manifest.webmanifest sw.js _site/
+          cp assets/app.js assets/style.css assets/plotly-basic.min.js _site/assets/
+          cp -r icons _site/
+          cp data/*.json _site/data/
+          sed -i "s/const BUILD = \"dev\";/const BUILD = \"${GITHUB_SHA::12}-${GITHUB_RUN_ID}\";/" _site/sw.js
+          touch _site/.nojekyll
+          du -sh _site; ls -la _site/data | head -40
+      - name: Privacy gate (fails the deploy on any personal/private data)
+        env:
+          PRIVACY_PATTERNS: ${{ secrets.PRIVACY_PATTERNS }}
+        run: python3 tools/privacy_scan.py --site _site --history --require-private
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+      - id: deployment
+        uses: actions/deploy-pages@v4

@@ -1,0 +1,13 @@
+# local / generated, not part of the site
+screenshots/
+data/cache/
+markets_standalone.html
+*_standalone.html
+assets/plotly.min.js
+_site/
+__pycache__/
+*.pyc
+.venv/
+.DS_Store
+*.log
+.privacy_patterns

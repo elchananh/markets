@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>סקירת שווקים — מחקר כללי</title>
+<meta name="description" content="סקירת שווקי מניות לפי מדינה: מדד מוביל, סקטורים ותשואות — מחקר כללי, ללא המלצות או תחזיות.">
+<meta name="theme-color" content="#ffffff">
+<meta name="color-scheme" content="light">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="שווקים">
+<meta name="format-detection" content="telephone=no">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png">
+<link rel="stylesheet" href="assets/style.css">
+<script defer src="assets/plotly-basic.min.js"></script>
+<script defer src="assets/app.js"></script>
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">סקירת שווקים</div>
+  <label class="sel"><span class="sel-lbl">שוק:</span>
+    <select id="marketSelect" aria-label="בחירת שוק"></select>
+  </label>
+  <div class="ranges" id="rangeBar" role="group" aria-label="טווח זמן">
+    <button type="button" data-r="1M">חודש</button>
+    <button type="button" data-r="YTD">מתחילת השנה</button>
+    <button type="button" data-r="1Y" class="on">שנה</button>
+    <button type="button" data-r="3Y">3 שנים</button>
+    <button type="button" data-r="5Y">5 שנים</button>
+    <button type="button" data-r="MAX">מקסימום</button>
+  </div>
+</header>
+<main id="app"><p class="muted">טוען נתונים…</p></main>
+<footer class="foot">
+  אין באמור המלצה או תחזית. כל הנתונים נמשכים ממקורות חיצוניים (Yahoo Finance, iShares, Global X; רענון מחירים חי בפתיחת הדף: CNBC) ומוצגים עם מקור ותאריך; נתון שלא נמצא מסומן "לא זמין".
+  <div id="appStatus" class="muted"></div>
+</footer>
+<noscript><p style="padding:20px">האתר דורש JavaScript.</p></noscript>
+</body>
+</html>

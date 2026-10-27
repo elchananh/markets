@@ -1,0 +1,91 @@
+:root{--bg:#f7f8fa;--card:#fff;--ink:#1d2433;--muted:#667085;--line:#e4e7ec;--acc:#1f6feb;--pos:#127a3e;--neg:#b42318}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:"Segoe UI","Noto Sans Hebrew","Arial Hebrew",Arial,sans-serif;font-size:15px;line-height:1.55}
+.topbar{position:sticky;top:0;z-index:10;background:#fff;border-bottom:1px solid var(--line);display:flex;flex-wrap:wrap;gap:12px 24px;align-items:center;padding:10px 20px}
+.brand{font-weight:700;font-size:17px}
+.sel select{font-size:15px;padding:4px 8px;border:1px solid var(--line);border-radius:6px;background:#fff}
+.ranges button{font:inherit;font-size:13px;border:1px solid var(--line);background:#fff;padding:4px 10px;border-radius:14px;cursor:pointer;margin-inline-start:4px}
+.ranges button.on{background:var(--acc);color:#fff;border-color:var(--acc)}
+main{max-width:1200px;margin:0 auto;padding:16px 20px 40px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:16px 18px;margin:14px 0}
+h1{font-size:26px;margin:4px 0 6px}
+h2{font-size:20px;margin:0 0 8px}
+h3{font-size:17px;margin:0 0 6px}
+.muted{color:var(--muted)}
+.src{color:var(--muted);font-size:12.5px;margin-top:6px}
+.src a{color:var(--muted)}
+.grid2{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:16px}.grid2>div{min-width:0}
+@media(max-width:900px){.grid2{grid-template-columns:1fr}}
+table{border-collapse:collapse;width:100%;font-size:13.5px}
+th,td{border-bottom:1px solid var(--line);padding:5px 6px;text-align:right;white-space:nowrap}
+th{background:#f2f4f7;font-weight:600}
+td.num{direction:ltr;text-align:left;font-variant-numeric:tabular-nums}
+.pos{color:var(--pos)}.neg{color:var(--neg)}
+.na{color:var(--muted);font-style:italic}
+.tablewrap{overflow-x:auto}
+.chart{width:100%;height:420px}
+.chart.sm{height:330px}
+.sector{border-inline-start:4px solid var(--acc)}
+.sector p{margin:6px 0}
+.kv{display:flex;flex-wrap:wrap;gap:6px 18px;font-size:13.5px;margin:6px 0}
+.kv span b{font-weight:600}
+.gaps li{margin:3px 0}
+.foot{text-align:center;color:var(--muted);font-size:12.5px;padding:20px}
+.toc a{margin-inline-end:12px;font-size:13.5px;color:var(--acc);text-decoration:none}
+.ltr{direction:ltr;unicode-bidi:embed}
+.note{background:#eef4ff;border:1px solid #c9dafc;border-radius:8px;padding:8px 12px;font-size:14px}
+.live{border-radius:8px;padding:8px 12px;margin:8px 0;font-size:13.5px;line-height:1.5}
+.live.pending{background:#f2f4f7;border:1px solid #d0d5dd;color:#475467}
+.live.ok{background:#ecfdf3;border:1px solid #abefc6;color:#05603a}
+.live.partial{background:#fffaeb;border:1px solid #fedf89;color:#7a2e0e}
+.live.fail{background:#fef3f2;border:1px solid #fecdca;color:#912018}
+.tag{font-size:12px;border-radius:8px;padding:0 6px;background:#f2f4f7;color:#475467;white-space:nowrap}
+.tag.live-ok{background:#ecfdf3;color:#05603a}
+.tag.live-no{background:#fef3f2;color:#912018}
+/* ---------- general robustness (no horizontal overflow) ---------- */
+html{-webkit-text-size-adjust:100%;text-size-adjust:100%}
+body{overflow-x:hidden;padding-left:env(safe-area-inset-left);padding-right:env(safe-area-inset-right)}
+.src,.gaps li,.note,.live,p{overflow-wrap:anywhere}
+.topbar{padding-top:max(10px,env(safe-area-inset-top))}
+.sel{display:flex;align-items:center;gap:6px}
+#mainSel{max-width:100%;font-size:14px;padding:3px 6px;border:1px solid var(--line);border-radius:6px;background:#fff}
+.ctl{display:flex;flex-wrap:wrap;gap:8px 16px;align-items:center;margin:4px 0}
+.ctl label{display:flex;align-items:center;gap:6px;min-width:0;max-width:100%}
+.chart{min-height:200px}
+.foot{padding-bottom:max(20px,env(safe-area-inset-bottom))}
+
+/* ---------- phones (iPhone ~375-430px) ---------- */
+@media (max-width:700px){
+  body{font-size:15px}
+  .topbar{display:grid;grid-template-columns:auto 1fr;gap:8px 10px;padding:8px 12px}
+  .brand{font-size:16px}
+  .sel{min-width:0}
+  .sel-lbl{display:none}
+  .sel select{width:100%;font-size:16px;min-height:40px;padding:6px 10px}       /* >=16px: iOS does not zoom on focus */
+  .ranges{grid-column:1 / -1;display:flex;gap:6px;overflow-x:auto;-webkit-overflow-scrolling:touch;scrollbar-width:none;padding-bottom:2px}
+  .ranges::-webkit-scrollbar{display:none}
+  .ranges button{flex:0 0 auto;margin:0;font-size:14px;min-height:36px;padding:6px 12px;border-radius:18px}
+  main{padding:8px 8px 28px}
+  .card{padding:12px 12px;margin:10px 0;border-radius:10px}
+  h1{font-size:22px}
+  h2{font-size:18px}
+  h3{font-size:16px}
+  .kv{font-size:13px;gap:2px 12px}
+  .toc{display:flex;flex-wrap:wrap;gap:6px}
+  .toc a{margin:0;padding:6px 10px;border:1px solid var(--line);border-radius:16px;font-size:13px}
+  .chart{height:300px}
+  .chart.sm{height:270px}
+  #chPie{height:420px}
+  #chAll{height:440px !important}
+  #mainSel{font-size:16px;width:100%;min-height:38px}
+  .ctl{flex-direction:column;align-items:stretch}
+  .ctl label{font-size:14px}
+  table{font-size:13px}
+  th,td{padding:6px 6px}
+  .tablewrap{overflow-x:auto;-webkit-overflow-scrolling:touch;margin:0 -4px;border-inline-start:1px solid var(--line)}
+  /* keep the row label visible while the numbers scroll sideways */
+  .tablewrap td:first-child,.tablewrap th:first-child{position:sticky;right:0;z-index:1;background:#fff;white-space:normal;min-width:120px;max-width:44vw;box-shadow:-1px 0 0 var(--line)}
+  .tablewrap th:first-child{background:#f2f4f7}
+  .live{font-size:13px}
+  .src{font-size:12px}
+}
