@@ -120,6 +120,8 @@ def fetch_ishares(fund):
     hdr = next(i for i, ln in enumerate(lines) if ln.startswith("Ticker,"))
     df = pd.read_csv(io.StringIO("\n".join(lines[hdr:])), dtype=str, on_bad_lines="skip")
     df = df[df["Ticker"].notna() & df["Name"].notna()].copy()
+    if "Weight (%)" not in df and "Market Weight" in df:   # newer iShares CSV layout (e.g. IVV since Oct 2026)
+        df["Weight (%)"] = df["Market Weight"]
     for c in ["Weight (%)", "Market Value", "Price"]:
         if c in df:
             df[c] = pd.to_numeric(df[c].str.replace(",", ""), errors="coerce")
