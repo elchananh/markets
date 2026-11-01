@@ -44,9 +44,9 @@ ALLOW = [
     ("local_path", r"/tmp/", r"^\.github/workflows/.*|^tools/privacy_scan\.py$", "CI temp files"),
     ("email", r"github-actions\[bot\]@users\.noreply\.github\.com|elchananh@users\.noreply\.github\.com", r".*",
      "GitHub noreply addresses (bot / repo owner handle), no personal email"),
-    ("email", r"@[0-9]+\.[0-9]+\.[0-9]+", r"^assets/plotly-basic\.min\.js$", "npm version strings inside the Plotly bundle"),
-    ("token_param", r".*", r"^assets/plotly-basic\.min\.js$", "Plotly bundle code (no credentials)"),
-    ("secret_kv", r"(?i)\b(?:api[_-]?key|access[_-]?token)\s*[:=]\s*['\"]?(?:this|e|t|n|r|o|i|a|void|null|undefined|\w\.\w)", r"^assets/plotly-basic\.min\.js$", "Plotly bundle variable names"),
+    ("email", r"@[0-9]+\.[0-9]+\.[0-9]+", r"^assets/plotly-(?:basic|custom)\.min\.js$", "npm version strings inside the Plotly bundle"),
+    ("token_param", r".*", r"^assets/plotly-(?:basic|custom)\.min\.js$", "Plotly bundle code (no credentials)"),
+    ("secret_kv", r"(?i)\b(?:api[_-]?key|access[_-]?token)\s*[:=]\s*['\"]?(?:this|e|t|n|r|o|i|a|void|null|undefined|\w\.\w)", r"^assets/plotly-(?:basic|custom)\.min\.js$", "Plotly bundle variable names"),
 ]
 SELF_DEFINITIONS = r"^(?:history:)?tools/privacy_scan\.py$"   # this file defines the generic regexes; its own lines are checked separately
 

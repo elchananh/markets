@@ -7,7 +7,7 @@
 const BUILD = "dev";
 const SHELL = "shell-" + BUILD;
 const DATA = "data-v1";
-const SHELL_FILES = ["./", "index.html", "assets/style.css", "assets/app.js", "assets/plotly-basic.min.js",
+const SHELL_FILES = ["./", "index.html", "assets/style.css", "assets/app.js", "assets/plotly-custom.min.js",
   "manifest.webmanifest", "icons/icon-192.png", "icons/icon-512.png", "icons/apple-touch-icon.png", "data/markets.json"];
 
 self.addEventListener("install", e => {

@@ -32,7 +32,7 @@ jobs:
           mkdir -p _site/data
           mkdir -p _site/assets
           cp index.html manifest.webmanifest sw.js _site/
-          cp assets/app.js assets/style.css assets/plotly-basic.min.js _site/assets/
+          cp assets/app.js assets/style.css assets/plotly-custom.min.js _site/assets/
           cp -r icons _site/
           cp data/*.json _site/data/
           sed -i "s/const BUILD = \"dev\";/const BUILD = \"${GITHUB_SHA::12}-${GITHUB_RUN_ID}\";/" _site/sw.js

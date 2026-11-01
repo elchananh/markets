@@ -89,3 +89,40 @@ body{overflow-x:hidden;padding-left:env(safe-area-inset-left);padding-right:env(
   .live{font-size:13px}
   .src{font-size:12px}
 }
+
+/* ---- correlation section */
+.corr-ctl{display:flex;flex-wrap:wrap;gap:8px 18px;align-items:center;margin:6px 0 10px}
+.corr-row{display:flex;flex-wrap:wrap;align-items:center;gap:6px}
+.corr-row .lbl{font-size:13.5px;color:var(--muted,#5f6b7a);font-weight:600}
+.seg{display:inline-flex;border:1px solid var(--line);border-radius:18px;overflow:hidden;background:#fff}
+.seg button{font:inherit;font-size:13.5px;border:0;background:transparent;padding:6px 12px;cursor:pointer;color:inherit;min-height:34px}
+.seg button+button{border-inline-start:1px solid var(--line)}
+.seg button.on{background:var(--acc);color:#fff}
+#cView{font-weight:600}
+.corr-pick{border-top:1px solid var(--line);padding-top:8px;margin-top:4px}
+.qk{font:inherit;font-size:13px;border:1px dashed var(--acc);color:var(--acc);background:#fff;border-radius:16px;padding:5px 10px;cursor:pointer;min-height:32px}
+.chips{display:flex;flex-wrap:wrap;gap:6px;margin:8px 0}
+.chip{font:inherit;font-size:13.5px;border:1px solid var(--line);background:#fff;border-radius:18px;padding:6px 12px;cursor:pointer;min-height:36px;color:inherit}
+.chip.on{background:#e7f0fe;border-color:var(--acc);color:#0b3d91;font-weight:600}
+.chip.warn{border-style:dashed}
+.chip:disabled{opacity:.5;cursor:not-allowed}
+.corr-warn{font-size:13px;color:#7a4b00;background:#fff8e6;border:1px solid #f3dca6;border-radius:8px;padding:8px 22px 8px 10px;margin:8px 0}
+.corr-warn:empty{display:none}
+details.method{margin-top:10px;font-size:13.5px}
+details.method summary{cursor:pointer;color:var(--acc);font-weight:600;min-height:32px;line-height:32px}
+.chart.heat{height:auto;min-height:360px}
+@media (max-width:700px){
+  .corr-ctl{flex-direction:column;align-items:stretch;gap:8px}
+  .corr-row{gap:6px}
+  #cView{display:flex}
+  #cView button{flex:1 1 0;font-size:15px;min-height:42px}
+  .seg button{min-height:38px;font-size:14px;padding:6px 10px}
+  .qk{min-height:36px;font-size:13.5px}
+  .chips{max-height:none}
+  .chip{min-height:40px;font-size:14px;padding:7px 12px}
+  #chCorr{height:340px}
+  #chCorrPx{height:300px}
+}
+.heat-scroll{overflow-x:auto;-webkit-overflow-scrolling:touch;max-width:100%}
+.heat-hint{font-size:.85em;margin:4px 0 0}
+.heat-hint[hidden]{display:none}

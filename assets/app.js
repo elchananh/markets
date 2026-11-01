@@ -120,7 +120,7 @@
       <div id="liveBanner" class="live ${D._live ? D._live.cls : "pending"}">${D._live ? D._live.html : "מרענן נתוני מחירים חיים…"}</div>
       ${D.index_note ? `<p class="note">${esc(D.index_note)}</p>` : ""}
       <p class="muted" style="font-size:13px">הערת מטבע: המדד המקומי מוצג במטבע ${esc(D.currency)}; קרנות סל אמריקאיות, גרפי הסקטורים וההשוואה ביניהם מוצגים בדולר (USD), ולכן כוללים את השפעת שער החליפין. מחירי Yahoo "מותאמים" (כוללים התאמת דיבידנדים/פיצולים). הנקודה האחרונה עשויה להיות תוך-יומית.</p>
-      <div class="toc"><a href="#s-main">מדד מוביל</a><a href="#s-pie">התפלגות סקטורים</a><a href="#s-sectors">סקטורים</a><a href="#s-all">כל הסקטורים יחד</a><a href="#s-src">מקורות ופערים</a></div></section>`;
+      <div class="toc"><a href="#s-main">מדד מוביל</a><a href="#s-pie">התפלגות סקטורים</a><a href="#s-sectors">סקטורים</a><a href="#s-all">כל הסקטורים יחד</a><a href="#s-corr">מתאם עם שווקים אחרים</a><a href="#s-src">מקורות ופערים</a></div></section>`;
 
     // main chart
     const L = seriesList(D);
@@ -176,6 +176,8 @@
     h += `<section class="card" id="s-all"><h2>כל הסקטורים יחד מול השוק (מנורמל ל-100, USD)</h2>${eqItems.some(s => s.chart) && D.market_usd && D.market_usd.series ? `<div id="chAll" class="chart" style="height:480px"></div>
       <div class="src">סקטורים = ${D.sectors.items.some(s => s.chart && s.chart.kind === "etf") ? "קרנות סקטור" : "סלי פרוקסי מחושבים (ראו שיטה בכל סקטור)"}; קו השוק = ${esc(D.market_usd.label)}. כולם בדולר. לחיצה על פריט במקרא מסתירה/מציגה אותו.</div>` : `<p>${NA}</p>`}</section>`;
 
+    h += corrSection(D);
+
     const srcs = [];
     srcs.push("<li>מחירים, מדדים ושערי חליפין: Yahoo Finance דרך yfinance (מחירי סגירה מותאמים).</li>");
     if (sec) {
@@ -192,6 +194,7 @@
     D._rerender = false;
     if ($("#mainSel")) { $("#mainSel").onchange = drawMain; $("#mainNorm").onchange = drawMain; }
     drawAll();
+    corrSetup(D);
     if (!D._live && !D._liveRunning) liveRefresh(D);
   }
 
@@ -269,6 +272,265 @@
     document.body.setAttribute("data-rendered", current.id);
   }
 
+
+  // ================================================================ correlation section (data/returns.json, no live refresh)
+  // Pearson correlation of log returns (not price levels). Pairwise alignment: only days/weeks on which BOTH markets have a
+  // close are used, and each return spans two consecutive common observations (holidays never create artificial zero returns).
+  const CORR = { data: null, loading: null, err: null, selBy: {}, view: "chart", freq: "W", ccy: "usd", per: "3Y", win: { D: 90, W: 26 }, norm: false, _c: {} };
+  const PER_HE = { "1Y": "שנה", "3Y": "3 שנים", "5Y": "5 שנים" };
+  const WIN_OPTS = { D: [60, 90, 120], W: [13, 26, 52] };
+  const MIN_N = { D: 30, W: 20 };
+  const HEAT_SCALE = [[0, "#2166ac"], [0.25, "#92c5de"], [0.5, "#f7f7f7"], [0.75, "#f4a582"], [1, "#b2182b"]];
+  function corrLoad() {
+    if (CORR.data) return Promise.resolve(CORR.data);
+    if (!CORR.loading) CORR.loading = fetch("data/returns.json", { cache: "no-cache" })
+      .then(r => { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
+      .then(R => { corrPrep(R); CORR.data = R; return R; })
+      .catch(e => { CORR.loading = null; CORR.err = String(e && e.message || e); throw e; });
+    return CORR.loading;
+  }
+  function corrPrep(R) {
+    const G = R.grid.dd.length, t0 = Date.UTC(+R.grid.d0.slice(0, 4), +R.grid.d0.slice(5, 7) - 1, +R.grid.d0.slice(8, 10));
+    R.dates = new Array(G); R.week = new Int32Array(G);
+    let day = 0;
+    for (let i = 0; i < G; i++) {
+      day += R.grid.dd[i];
+      const t = t0 + day * 864e5, dow = new Date(t).getUTCDay();   // week = the Friday on/after the date (Sat/Sun -> next week)
+      R.dates[i] = new Date(t).toISOString().slice(0, 10);
+      R.week[i] = Math.round((t + ((5 - dow + 7) % 7) * 864e5) / 864e5);
+    }
+    R.byId = {}; R.markets.forEach(m => { R.byId[m.id] = m; });
+    R.last = R.dates[G - 1];
+  }
+  // cumulative log level (units of R.unit) on the shared calendar, NaN where the market has no close
+  function corrLevels(m, basis) {
+    const R = CORR.data, b = (basis === "loc" && m.loc) ? "loc" : "usd", o = m[b];
+    if (!o) return null;
+    const key = m.id + ":" + b; if (CORR._c[key]) return CORR._c[key];
+    const G = R.dates.length, lv = new Float64Array(G).fill(NaN), miss = new Uint8Array(G);
+    for (let k = 0; k < o.x.length; k += 2) for (let i = o.x[k]; i < o.x[k] + o.x[k + 1]; i++) miss[i] = 1;
+    let j = 0, acc = 0;
+    for (let i = 0; i < G; i++) if (!miss[i]) { acc += o.r[j++]; lv[i] = acc; }
+    return (CORR._c[key] = { lv, basis: b });
+  }
+  // aligned return pairs {d:[], a:[], b:[]} over the whole calendar
+  function corrPair(A, B, freq) {
+    const R = CORR.data, u = R.unit, out = { d: [], a: [], b: [] };
+    if (freq === "D") {
+      let p = -1;
+      for (let i = 0; i < A.length; i++) {
+        if (isNaN(A[i]) || isNaN(B[i])) continue;
+        if (p >= 0) { out.d.push(R.dates[i]); out.a.push((A[i] - A[p]) * u); out.b.push((B[i] - B[p]) * u); }
+        p = i;
+      }
+      return out;
+    }
+    // weekly: last close of each market within the week, then consecutive weeks in which both traded
+    const wk = [];   // [weekKey, idxA, idxB]
+    for (let i = 0; i < A.length; i++) {
+      const w = R.week[i]; let cur = wk[wk.length - 1];
+      if (!cur || cur[0] !== w) { cur = [w, -1, -1]; wk.push(cur); }
+      if (!isNaN(A[i])) cur[1] = i;
+      if (!isNaN(B[i])) cur[2] = i;
+    }
+    let p = null;
+    wk.forEach(w => {
+      if (w[1] < 0 || w[2] < 0) return;
+      if (p) { out.d.push(new Date(w[0] * 864e5).toISOString().slice(0, 10)); out.a.push((A[w[1]] - A[p[1]]) * u); out.b.push((B[w[2]] - B[p[2]]) * u); }
+      p = w;
+    });
+    return out;
+  }
+  function pearson(a, b, i0, i1) {
+    let n = 0, sa = 0, sb = 0, saa = 0, sbb = 0, sab = 0;
+    for (let i = i0; i < i1; i++) { const x = a[i], y = b[i]; n++; sa += x; sb += y; saa += x * x; sbb += y * y; sab += x * y; }
+    const va = saa - sa * sa / n, vb = sbb - sb * sb / n;
+    return (n < 3 || va <= 0 || vb <= 0) ? null : (sab - sa * sb / n) / Math.sqrt(va * vb);
+  }
+  function corrPeriodStart() {
+    const d = new Date(CORR.data.last + "T00:00:00Z"); d.setUTCFullYear(d.getUTCFullYear() - (+CORR.per[0]));
+    return d.toISOString().slice(0, 10);
+  }
+  function corrStats(P, start) {
+    let i0 = 0; while (i0 < P.d.length && P.d[i0] < start) i0++;
+    const n = P.d.length - i0;
+    return { n, r: n >= MIN_N[CORR.freq] ? pearson(P.a, P.b, i0, P.d.length) : null, from: P.d[i0], to: P.d[P.d.length - 1] };
+  }
+  function corrDefaultSel(cur) {
+    const R = CORR.data, ok = R.markets.filter(m => !m.excluded && m.id !== cur.id);
+    const same = ok.filter(m => m.region_he === cur.region_he).map(m => m.id);
+    const s = new Set(); if (cur.id !== "usa") s.add("usa");
+    same.slice(0, 3).forEach(x => s.add(x));
+    if (s.size < 2) ["uk", "japan", "china"].forEach(x => { if (s.size < 3 && x !== cur.id && R.byId[x]) s.add(x); });
+    return s;
+  }
+  const fmtR = r => r == null ? "—" : (r < 0 ? "−" : "") + Math.abs(r).toFixed(2);
+  const corrName = m => `${m.flag} ${m.name_he}`;
+
+  function corrSection(D) {
+    return `<section class="card" id="s-corr"><h2>מתאם (קורלציה) עם שווקים אחרים</h2>
+      <p class="muted" style="font-size:13px">מתאם היסטורי בין תשואות ${esc(D.name_he)} לבין שווקים לבחירתכם — בגרף לאורך זמן (מתאם מתגלגל) או במפת חום. מתאם אינו תחזית ואינו מעיד על קשר סיבתי.</p>
+      <div id="corrBox" class="corrbox"><p class="muted">טוען נתוני מתאם…</p></div></section>`;
+  }
+  function corrSetup(D) {
+    const box = $("#corrBox"); if (!box) return;
+    lazy(box, () => corrLoad().then(() => { if (current === D) corrUI(D); })
+      .catch(e => { box.innerHTML = `<p>${NA} — נתוני המתאם (data/returns.json) לא נטענו (${esc(e.message)}).${location.protocol === "file:" ? " " + FILE_HINT : " ייתכן שאין חיבור לאינטרנט."}</p>`; document.body.setAttribute("data-corr", "error"); }));
+  }
+  function seg(id, opts, val) {
+    return `<div class="seg" id="${id}" role="group">${opts.map(([v, t]) => `<button type="button" data-v="${v}" class="${String(v) === String(val) ? "on" : ""}" aria-pressed="${String(v) === String(val)}">${t}</button>`).join("")}</div>`;
+  }
+  function corrUI(D) {
+    const R = CORR.data, box = $("#corrBox"); if (!box) return;
+    const me = R.byId[D.id];
+    if (!me || me.excluded) {
+      box.innerHTML = `<p>${NA} — ${esc(me ? me.excluded : "לשוק זה אין סדרה בקובץ המתאם")}.</p>`; document.body.setAttribute("data-corr", "na"); return;
+    }
+    if (!CORR.selBy[D.id]) CORR.selBy[D.id] = corrDefaultSel(D);
+    const sel = CORR.selBy[D.id];
+    const others = R.markets.filter(m => m.id !== D.id), regions = [];
+    others.forEach(m => { if (!regions.includes(m.region_he)) regions.push(m.region_he); });
+    box.innerHTML = `
+      <div class="corr-ctl">
+        ${seg("cView", [["chart", "גרף לאורך זמן"], ["heat", "מפת חום"]], CORR.view)}
+        <div class="corr-row"><span class="lbl">תדירות:</span>${seg("cFreq", [["W", "שבועי"], ["D", "יומי"]], CORR.freq)}</div>
+        <div class="corr-row"><span class="lbl">מטבע:</span>${seg("cCcy", [["usd", "דולר (USD)"], ["loc", "מטבע מקומי"]], CORR.ccy)}</div>
+        <div class="corr-row"><span class="lbl">תקופה:</span>${seg("cPer", Object.keys(PER_HE).map(k => [k, PER_HE[k]]), CORR.per)}</div>
+        <div class="corr-row" id="cWinRow"><span class="lbl">חלון מתגלגל:</span>${seg("cWin", WIN_OPTS[CORR.freq].map(w => [w, CORR.freq === "W" ? `${w} שבועות` : `${w} ימי מסחר`]), CORR.win[CORR.freq])}</div>
+        <label class="corr-row" id="cNormRow"><input type="checkbox" id="cNorm" ${CORR.norm ? "checked" : ""}> הצג גם מחירים מנורמלים (100 = תחילת התקופה)</label>
+      </div>
+      <div class="corr-pick"><div class="corr-row"><span class="lbl">השוואה מול:</span>
+        <button type="button" class="qk" data-q="all">בחר הכל</button><button type="button" class="qk" data-q="none">נקה</button>
+        ${regions.map(r => `<button type="button" class="qk" data-q="r:${escA(r)}">${esc(r)}</button>`).join("")}</div>
+        <div class="chips">${others.map(m => `<button type="button" class="chip${sel.has(m.id) ? " on" : ""}${m.flags && m.flags.length ? " warn" : ""}" data-id="${m.id}" aria-pressed="${sel.has(m.id)}" ${m.excluded ? `disabled title="${escA(m.excluded)}"` : ""}>${esc(corrName(m))}${m.excluded ? " (לא זמין)" : m.flags && m.flags.length ? " ⚠" : ""}</button>`).join("")}</div>
+      </div>
+      <div id="corrWarn"></div>
+      <div id="chCorr" class="chart"></div><div id="chCorrPx" class="chart"></div><div class="heat-scroll" id="heatWrap"><div id="chHeat" class="chart heat"></div></div><p class="muted heat-hint" id="heatHint" hidden>המפה רחבה מהמסך — גללו הצידה כדי לראות את כל השווקים.</p>
+      <div id="corrTable"></div>
+      <details class="method"><summary>שיטת החישוב</summary>${corrMethod()}</details>`;
+    const bindSeg = (id, fn) => box.querySelectorAll(`#${id} button`).forEach(b => b.onclick = () => { fn(b.dataset.v); corrUI(D); });
+    bindSeg("cView", v => CORR.view = v);
+    bindSeg("cFreq", v => CORR.freq = v);
+    bindSeg("cCcy", v => CORR.ccy = v);
+    bindSeg("cPer", v => CORR.per = v);
+    bindSeg("cWin", v => CORR.win[CORR.freq] = +v);
+    $("#cNorm").onchange = e => { CORR.norm = e.target.checked; corrDraw(D); };
+    box.querySelectorAll(".chip").forEach(b => b.onclick = () => { const id = b.dataset.id; sel.has(id) ? sel.delete(id) : sel.add(id); b.classList.toggle("on", sel.has(id)); b.setAttribute("aria-pressed", sel.has(id)); corrDraw(D); });
+    box.querySelectorAll(".qk").forEach(b => b.onclick = () => {
+      const q = b.dataset.q, ok = others.filter(m => !m.excluded);
+      if (q === "all") ok.forEach(m => sel.add(m.id));
+      else if (q === "none") sel.clear();
+      else { const grp = ok.filter(m => m.region_he === q.slice(2)); const allOn = grp.every(m => sel.has(m.id)); grp.forEach(m => allOn ? sel.delete(m.id) : sel.add(m.id)); }
+      corrUI(D);
+    });
+    corrDraw(D);
+  }
+  function corrDraw(D) {
+    const R = CORR.data, me = R.byId[D.id], sel = CORR.selBy[D.id];
+    const chosen = R.markets.filter(m => sel.has(m.id) && !m.excluded && m.id !== D.id);
+    const isChart = CORR.view === "chart";
+    $("#cWinRow").style.display = $("#cNormRow").style.display = isChart ? "" : "none";
+    const start = corrPeriodStart(), freqHe = CORR.freq === "W" ? "שבועיות" : "יומיות";
+    const ccyHe = CORR.ccy === "usd" ? "בדולר" : "במטבע מקומי";
+    // warnings
+    const warn = [];
+    if (CORR.freq === "D") warn.push("<b>תשואות יומיות:</b> שעות המסחר באסיה, באירופה ובאמריקה אינן חופפות — תנועה בוול סטריט אחרי סגירת השווקים באסיה תיראה שם רק ביום המסחר הבא, ולכן מתאם יומי בין אזורי זמן שונים מוטה כלפי מטה (נמוך מהקשר האמיתי). לתמונה מדויקת יותר בחרו \"שבועי\".");
+    if (CORR.ccy === "loc") warn.push("<b>מטבע מקומי:</b> מדדים נמדדים במטבע שלהם (ללא השפעת שער החליפין); שווקים שמיוצגים בקרן סל דולרית נשארים בדולר.");
+    [me].concat(chosen).forEach(m => (m.flags || []).forEach(f => warn.push(`${esc(corrName(m))}: ${esc(f)}`)));
+    R.markets.filter(m => m.excluded && m.id !== D.id).forEach(m => warn.push(`${esc(corrName(m))}: ${esc(m.excluded)}`));
+    $("#corrWarn").innerHTML = `<ul class="gaps corr-warn">${warn.map(w => `<li>${w}</li>`).join("")}</ul>`;
+    const A = corrLevels(me, CORR.ccy);
+    const rows = chosen.map((m, i) => {
+      const B = corrLevels(m, CORR.ccy), P = corrPair(A.lv, B.lv, CORR.freq);
+      return { m, i, B, P, st: corrStats(P, start) };
+    });
+    const elC = $("#chCorr"), elP = $("#chCorrPx"), elH = $("#chHeat");
+    $("#heatHint").hidden = true;
+    [elC, elP, elH].forEach(el => { if (el.classList.contains("js-plotly-plot")) Plotly.purge(el); el.innerHTML = ""; el.style.display = "none"; });
+    if (!chosen.length) {
+      $("#corrTable").innerHTML = `<p class="muted">בחרו לפחות שוק אחד להשוואה.</p>`;
+      document.body.setAttribute("data-corr", CORR.view + ":0"); return;
+    }
+    const W = CORR.win[CORR.freq], winHe = CORR.freq === "W" ? `${W} שבועות` : `${W} ימי מסחר`;
+    if (isChart) {
+      elC.style.display = "";
+      const tr = rows.map(o => {
+        const P = o.P, x = [], y = [];
+        let sa = 0, sb = 0, saa = 0, sbb = 0, sab = 0;
+        for (let i = 0; i < P.d.length; i++) {
+          sa += P.a[i]; sb += P.b[i]; saa += P.a[i] ** 2; sbb += P.b[i] ** 2; sab += P.a[i] * P.b[i];
+          if (i >= W) { const j = i - W; sa -= P.a[j]; sb -= P.b[j]; saa -= P.a[j] ** 2; sbb -= P.b[j] ** 2; sab -= P.a[j] * P.b[j]; }
+          if (i >= W - 1 && P.d[i] >= start) {
+            const va = saa - sa * sa / W, vb = sbb - sb * sb / W;
+            x.push(P.d[i]); y.push(va > 0 && vb > 0 ? +((sab - sa * sb / W) / Math.sqrt(va * vb)).toFixed(4) : null);
+          }
+        }
+        return { x, y, type: "scatter", mode: "lines", name: bidi(o.m.name_he), line: { width: 1.8, color: COLORS[o.i % COLORS.length] },
+          hovertemplate: `${escA(o.m.name_he)}: %{y:.2f}<extra></extra>` };
+      });
+      const lay = LAYOUT(`מתאם מתגלגל (${winHe}, תשואות ${freqHe} ${ccyHe}) — ${D.name_he} מול השווקים שנבחרו, ${PER_HE[CORR.per]}`, "מתאם");
+      lay.yaxis.range = [-1, 1]; lay.yaxis.zeroline = true; lay.yaxis.zerolinecolor = "#868e96"; lay.yaxis.dtick = 0.5;
+      lay.shapes = [{ type: "line", xref: "paper", x0: 0, x1: 1, y0: 0, y1: 0, line: { color: "#868e96", width: 1, dash: "dot" } }];
+      Plotly.react(elC, tr, lay, CFG());
+      if (CORR.norm) {
+        elP.style.display = "";
+        const u = R.unit, px = [{ m: me, L: A, c: "#111", w: 2.6 }].concat(rows.map(o => ({ m: o.m, L: o.B, c: COLORS[o.i % COLORS.length], w: 1.6 })));
+        const tp = px.map(o => {
+          const lv = o.L.lv, x = [], y = []; let base = null;
+          for (let i = 0; i < lv.length; i++) { if (R.dates[i] < start || isNaN(lv[i])) continue; if (base == null) base = lv[i]; x.push(R.dates[i]); y.push(+(100 * Math.exp((lv[i] - base) * u)).toFixed(2)); }
+          return { x, y, type: "scatter", mode: "lines", name: bidi(o.m.name_he), line: { width: o.w, color: o.c }, connectgaps: true };
+        });
+        Plotly.react(elP, tp, LAYOUT(`מחירים מנורמלים ${ccyHe} — ${PER_HE[CORR.per]} (100 = תחילת התקופה)`, "100 = תחילת התקופה"), CFG());
+      }
+    } else {
+      elH.style.display = "";
+      const ms = [me].concat(chosen), n = ms.length, Ls = ms.map(m => corrLevels(m, CORR.ccy));
+      const z = [], txt = [], hov = [];
+      for (let i = 0; i < n; i++) { z.push([]); txt.push([]); hov.push([]); }
+      for (let i = 0; i < n; i++) for (let j = i; j < n; j++) {
+        let r, s;
+        if (i === j) { r = 1; s = null; }
+        else { s = corrStats(corrPair(Ls[i].lv, Ls[j].lv, CORR.freq), start); r = s.r; }
+        const t = r == null ? "—" : fmtR(r), h = i === j ? `${ms[i].name_he}` : `${ms[i].name_he} ↔ ${ms[j].name_he}<br>מתאם: ${t}<br>N = ${s.n} תשואות ${freqHe}<br>${dateHe(s.from)} – ${dateHe(s.to)}`;
+        z[i][j] = z[j][i] = r; txt[i][j] = txt[j][i] = t; hov[i][j] = hov[j][i] = h;
+      }
+      const m = isMobile(), names = ms.map(x => bidi(x.name_he.replace(/\s*\(.*?\)\s*/g, " ").trim()));
+      // keep cells legible: if the matrix does not fit, the heatmap gets its own horizontal scroll (the page itself never overflows)
+      const avail = ($("#heatWrap").clientWidth || (window.innerWidth || 390) - 40), cell = m ? 36 : 42, need = (m ? 130 : 160) + n * cell + 70;
+      const wide = need > avail; $("#heatHint").hidden = !wide;
+      const fs = wide ? (m ? 9.5 : 10.5) : n <= 6 ? (m ? 12 : 13) : n <= 10 ? (m ? 10 : 12) : n <= 15 ? (m ? 9 : 10) : (m ? 8 : 9);
+      const lay = LAYOUT(`מפת מתאם — תשואות ${freqHe} ${ccyHe}, ${PER_HE[CORR.per]}`);
+      // RTL: market names on the right, first market in the top-right corner, colour scale on the left
+      const tf = { size: m ? (n > 12 && !wide ? 8 : 10) : 11 };
+      Object.assign(lay, { hovermode: "closest", margin: m ? { l: 40, r: wide ? 110 : 70, t: lay.margin.t, b: 70 } : { l: 70, r: 120, t: 50, b: 100 } });
+      lay.xaxis = { tickangle: 45, automargin: true, fixedrange: true, autorange: "reversed", tickfont: tf };
+      lay.yaxis = { autorange: "reversed", automargin: true, fixedrange: true, side: "right", tickfont: tf };
+      const sz = wide ? n * cell : Math.min(m ? avail : 760, Math.max(m ? 300 : 380, 70 + n * (m ? 30 : 40)));
+      elH.style.height = (sz + (m ? 110 : 150)) + "px";
+      elH.style.width = wide ? need + "px" : "";
+      Plotly.react(elH, [{ type: "heatmap", z, x: names, y: names, text: txt, texttemplate: "%{text}", textfont: { size: fs },
+        customdata: hov, hovertemplate: "%{customdata}<extra></extra>", zmin: -1, zmax: 1, zmid: 0, colorscale: HEAT_SCALE, xgap: 1, ygap: 1,
+        colorbar: { thickness: m ? 10 : 14, len: 0.9, x: -0.02, xanchor: "right", tickvals: [-1, -0.5, 0, 0.5, 1], tickfont: { size: 10 } } }], lay, CFG());
+    }
+    // summary table (sample size and date range per pair)
+    $("#corrTable").innerHTML = `<h3 style="margin-top:12px">${esc(D.name_he)} מול כל שוק — ${PER_HE[CORR.per]}, תשואות ${freqHe} ${ccyHe}</h3>
+      <div class="tablewrap"><table><tr><th>שוק</th><th>מתאם</th><th>N (תצפיות משותפות)</th><th>טווח תאריכים</th><th>סדרה</th></tr>
+      ${rows.map(o => `<tr><td>${esc(corrName(o.m))}${o.m.flags && o.m.flags.length ? " ⚠" : ""}</td><td class="num"><span class="ltr">${o.st.r == null ? NA : fmtR(o.st.r)}</span></td><td class="num">${o.st.n}${o.st.r == null && o.st.n < MIN_N[CORR.freq] ? ` (מתחת למינימום ${MIN_N[CORR.freq]})` : ""}</td><td>${o.st.n ? `${dateHe(o.st.from)} – ${dateHe(o.st.to)}` : NA}</td><td>${esc(o.m.ticker)}${corrLevels(o.m, CORR.ccy).basis === "loc" ? ` (${esc(o.m.loc_ccy)})` : " (USD)"}</td></tr>`).join("")}</table></div>
+      <div class="src">${esc(D.name_he)}: <bdi>${esc(me.ticker)}</bdi> (${A.basis === "loc" ? esc(me.loc_ccy) : "USD"}). מקור: ${esc(R.source)} — מתעדכן בריצה היומית (${dtHe(R.generated_at)}); החלק הזה אינו מתרענן חי. תאריך אחרון בקובץ: ${dateHe(R.last)}.</div>`;
+    document.body.setAttribute("data-corr", CORR.view + ":" + chosen.length);
+  }
+  function corrMethod() {
+    return `<ul class="gaps">
+      <li><b>מה נמדד:</b> מתאם פירסון בין <b>תשואות לוגריתמיות</b> (ln של היחס בין מחירי סגירה עוקבים) — לא בין רמות מחיר. מתאם בין רמות מחיר של סדרות עם מגמה יוצא גבוה גם כשאין קשר בין התנודות (מתאם מדומה).</li>
+      <li><b>סדרה:</b> הסדרה הראשית של כל שוק — המדד המוביל, או קרן הסל המייצגת כשהמדד אינו זמין (מסומן ⚠). מחירי סגירה מותאמים מ-Yahoo Finance, אותם נתונים שבגרף הראשי.</li>
+      <li><b>יישור תאריכים:</b> לכל זוג שווקים נלקחות רק תצפיות שבהן <b>שני</b> השווקים נסחרו, והתשואה מחושבת בין שתי תצפיות משותפות עוקבות. כך חגים וימי מסחר שונים אינם יוצרים תשואות אפס מלאכותיות. במפת החום כל תא מחושב על הזוג שלו (pairwise), ולכן מספר התצפיות N עשוי להשתנות מתא לתא.</li>
+      <li><b>שבועי (ברירת מחדל) או יומי:</b> שבועי = מחיר הסגירה האחרון בכל שבוע (שבוע המסתיים ביום שישי; מסחר בשבת/ראשון נספר לשבוע שאחריו). מתאם יומי בין שווקים באזורי זמן שונים (אסיה / אירופה / אמריקה) מוטה כלפי מטה, כי הבורסות אינן נסגרות באותה שעה; התשואות השבועיות מקטינות את ההטיה הזו.</li>
+      <li><b>בסיס מטבע:</b> דולר (ברירת מחדל) — כל הסדרות מומרות לדולר (המדד ÷ שער החליפין מול הדולר, Yahoo Finance), כך שכולן נמדדות באותה יחידה; המתאם כולל את השפעת שערי החליפין. מטבע מקומי — כל מדד במטבע שלו; שווקים שמיוצגים בקרן סל דולרית נשארים בדולר.</li>
+      <li><b>תקופה ומדגם:</b> התקופה (שנה / 3 / 5 שנים) נמדדת אחורה מהתאריך האחרון בקובץ. מתאם מוצג רק כשיש לפחות ${MIN_N.W} תצפיות שבועיות / ${MIN_N.D} יומיות משותפות. בטבלה מוצגים N וטווח התאריכים לכל זוג.</li>
+      <li><b>מתאם מתגלגל:</b> לכל נקודה — המתאם ב-X התצפיות המשותפות האחרונות (החלון הנבחר). הקו מתחיל רק כשמצטברות מספיק תצפיות.</li>
+      <li><b>דיוק:</b> המחירים נשמרים בקובץ כרמות לוגריתמיות ברזולוציה של 0.01% (נקודת בסיס); ההשפעה על המתאם זניחה. נשמרות כ-5 שנים של סגירות יומיות.</li>
+      <li>נתונים היסטוריים בלבד — אין כאן תחזית או המלצה.</li></ul>`;
+  }
 
   // ================================================================ live refresh (browser-side, on every page open)
   // Source: CNBC public quote/chart endpoints (keyless; send Access-Control-Allow-Origin: *), so they work from file://.
@@ -466,7 +728,7 @@
     load(start);
     // redraw on rotation / crossing the mobile breakpoint (layout differs between phone and desktop)
     let lastMobile = isMobile();
-    window.addEventListener("resize", () => { if (isMobile() !== lastMobile) { lastMobile = isMobile(); drawAll(); } });
+    window.addEventListener("resize", () => { if (isMobile() !== lastMobile) { lastMobile = isMobile(); drawAll(); if (CORR.data && current && $("#chCorr")) corrDraw(current); } });
   }
   document.addEventListener("DOMContentLoaded", init);
   // offline support (app shell + last viewed markets); only over http(s) and not in the single-file build

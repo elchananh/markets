@@ -631,19 +631,106 @@ def write_index():
     open(data_path("markets.json"), "w", encoding="utf-8").write(js_dump(avail))
     return [a["id"] for a in avail]
 
+RET_YEARS = 5          # correlation section: periods up to 5 years
+RET_UNIT = 1e-4        # log levels stored in units of 0.0001 (1 basis point)
+RET_STALE_DAYS = 7     # a series that ends this many days before the newest series is labelled stale
+
+def decode_compact(c):
+    days = np.cumsum(c["dd"])
+    idx = pd.to_datetime(c["d0"]) + pd.to_timedelta(days, unit="D")
+    return pd.Series(c["v"], index=idx, dtype="float64").dropna()
+
+def build_returns(ids):
+    """data/returns.json: compact aligned daily closes of each market's main series (USD and local currency) for the
+    correlation section. Values are cumulative log levels log(P_t/P_first) in basis points on a shared calendar (union
+    of all trading days), so the browser can rebuild daily/weekly log returns for any pair without loading 23 files."""
+    metas, raw = [], {}
+    for mid in ids:
+        D = load_previous(mid); cfg = MARKETS.get(mid, {})
+        if not D:
+            continue
+        m = {"id": mid, "name_he": cfg.get("name_he", D.get("name_he")), "flag": cfg.get("flag", ""), "region_he": cfg.get("region_he", ""),
+             "ccy": D.get("currency"), "flags": []}
+        ix, mu = D.get("index"), D.get("market_usd")
+        if not mu or not mu.get("series"):
+            m["excluded"] = ("אין סדרת מניות או קרן לשוק זה (מוצג שער מט\"ח בלבד) — לא נכלל בחישוב המתאם" if D.get("fx")
+                             else "אין סדרת מחירים לשוק זה — לא נכלל בחישוב המתאם")
+            metas.append(m); continue
+        m["ticker"] = mu.get("ticker"); m["label_usd"] = mu.get("label")
+        raw[(mid, "usd")] = decode_compact(mu["series"])
+        if ix and ix.get("series") and ix.get("currency") and ix["currency"] != "USD":
+            raw[(mid, "loc")] = decode_compact(ix["series"]); m["loc_ccy"] = ix["currency"]
+            m["label_loc"] = f"{ix.get('name_he')} ({ix['currency']})"
+        if ix and ix.get("kind") == "etf":
+            m["flags"].append(f"קרן סל ({ix.get('ticker')}) ולא המדד עצמו")
+        if D.get("currency") != "USD" and "loc" not in [b for (x, b) in raw if x == mid]:
+            m["flags"].append("אין סדרה במטבע מקומי — גם בבסיס \"מטבע מקומי\" מחושב בדולר")
+        if ix and ix.get("kind") != "etf" and D.get("currency") != "USD":
+            m["usd_method"] = "המדד ÷ שער החליפין (Yahoo)"
+        if D.get("index_note"):
+            m["note"] = D["index_note"]
+        metas.append(m)
+    if not raw:
+        return None
+    newest = max(sr.index[-1] for sr in raw.values())
+    start = newest - pd.DateOffset(years=RET_YEARS) - pd.Timedelta(days=14)
+    clipped = {k: sr[sr.index >= start] for k, sr in raw.items()}
+    grid = sorted(set().union(*[set(sr.index) for sr in clipped.values()]))
+    gpos = {d: i for i, d in enumerate(grid)}
+    for m in metas:
+        if m.get("excluded"):
+            continue
+        last = raw[(m["id"], "usd")].index[-1]
+        m["last"] = last.strftime("%Y-%m-%d")
+        if (newest - last).days >= RET_STALE_DAYS:
+            m["flags"].append(f"נתונים ישנים: הסדרה מסתיימת ב-{last.strftime('%d.%m.%Y')} (המקור לא התעדכן)")
+        for b in ("usd", "loc"):
+            sr = clipped.get((m["id"], b))
+            if sr is None:
+                continue
+            sr = sr[sr > 0]
+            if len(sr) < 30:
+                continue
+            gaps = np.diff(sr.index.values).astype("timedelta64[D]").astype(int)
+            if len(gaps) and gaps.max() > 15:
+                m["flags"].append(f"חסרים ימי מסחר בסדרה ({b.upper()}): פער של עד {int(gaps.max())} ימים")
+            q = np.round(np.log(sr.values / sr.values[0]) / RET_UNIT).astype(int)
+            r = np.diff(q, prepend=q[0]).tolist()             # first value 0 (start of series)
+            pos = [gpos[d] for d in sr.index]
+            missing, j = [], 0                               # [start, length] runs of grid days without a close
+            prevp = -1
+            for p_ in pos + [len(grid)]:
+                if p_ > prevp + 1:
+                    missing += [prevp + 1, p_ - prevp - 1]
+                prevp = p_
+            m[b] = {"first": sr.index[0].strftime("%Y-%m-%d"), "n": len(sr), "x": missing, "r": [int(v) for v in r]}
+    ns = [m["usd"]["n"] for m in metas if m.get("usd")]
+    med = float(np.median(ns)) if ns else 0
+    for m in metas:
+        if m.get("usd") and m["usd"]["n"] < 0.9 * med:
+            m["flags"].append(f"בסדרה {m['usd']['n']} ימי מסחר בלבד — כ-{100 - 100 * m['usd']['n'] / med:.0f}% פחות מהחציון של השווקים ({med:.0f}) באותה תקופה")
+    gdays = (pd.DatetimeIndex(grid) - grid[0]).days.values
+    out = {"generated_at": now_iso(), "unit": RET_UNIT, "basis": "cumulative log level log(P_t/P_first) / unit; r = day-to-day differences",
+           "grid": {"d0": grid[0].strftime("%Y-%m-%d"), "dd": [int(x) for x in np.diff(gdays, prepend=0)]},
+           "source": "Yahoo Finance (yfinance) — מחירי סגירה מתואמים; אותה סדרה של הגרף הראשי בכל שוק", "markets": metas}
+    open(data_path("returns.json"), "w", encoding="utf-8").write(js_dump(out))
+    log("returns.json", f"{os.path.getsize(data_path('returns.json'))/1024:.0f} KB,", len(grid), "calendar days,",
+        sum(1 for m in metas if not m.get("excluded")), "markets")
+    return out
+
 def build_standalone(ids, out_name):
     """Optional single-file build (everything inlined). Large; meant for desktop/offline use, not deployed."""
     html = open(os.path.join(ROOT, "index.html"), encoding="utf-8").read()
     css = open(os.path.join(ROOT, "assets", "style.css"), encoding="utf-8").read()
     app = open(os.path.join(ROOT, "assets", "app.js"), encoding="utf-8").read()
-    plotly = open(os.path.join(ROOT, "assets", "plotly-basic.min.js"), encoding="utf-8").read()
+    plotly = open(os.path.join(ROOT, "assets", "plotly-custom.min.js"), encoding="utf-8").read()
     assert "</script" not in plotly.lower()
     mk = json.load(open(data_path("markets.json"), encoding="utf-8"))
     data = {m: json.load(open(data_path(f"{m}.json"), encoding="utf-8")) for m in ids}
     boot = ("window.STANDALONE=" + json.dumps(ids) + ";window.MARKETS=" + js_dump(mk) + ";window.MARKET_DATA=" + js_dump(data) + ";").replace("</", "<\\/")
     html = re.sub(r'<link rel="(manifest|apple-touch-icon|icon)"[^>]*>\n?', "", html)
     html = html.replace('<link rel="stylesheet" href="assets/style.css">', "<style>\n" + css + "\n</style>")
-    html = html.replace('<script defer src="assets/plotly-basic.min.js"></script>', "<script>" + plotly + "</script>")
+    html = html.replace('<script defer src="assets/plotly-custom.min.js"></script>', "<script>" + plotly + "</script>")
     html = html.replace('<script defer src="assets/app.js"></script>', "<script>" + boot + "</script><script>\n" + app + "\n</script>")
     open(os.path.join(ROOT, out_name), "w", encoding="utf-8").write(html)
     log("standalone", out_name, f"{os.path.getsize(os.path.join(ROOT, out_name))/1e6:.1f} MB")
@@ -674,6 +761,7 @@ def main():
             save_info_cache(cache)
     avail = write_index()
     log("markets with data:", len(avail))
+    build_returns(avail)
     if "--standalone" in sys.argv:
         build_standalone(avail, "markets_standalone.html")
     if "--per-market-standalone" in sys.argv:
