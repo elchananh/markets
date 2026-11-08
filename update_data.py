@@ -7,6 +7,7 @@ Usage:
     python3 update_data.py brazil japan       # selected markets
     python3 update_data.py --no-fundamentals  # skip per-stock Yahoo .info calls (faster)
     python3 update_data.py --build-only       # no downloads: re-compact existing data/*.json and rebuild data/markets.json
+    python3 update_data.py --fees-only        # refresh ETF expense ratios and inject into existing data/*.json
     python3 update_data.py --standalone       # also build markets_standalone.html (single offline file, large; not deployed)
 
 Writes:
@@ -90,17 +91,27 @@ def http_get(url, timeout=60):
     raise RuntimeError("HTTP failed: " + url)
 
 # ================================================================ fund providers
-_SCREENER = None
+_SCREENER = None          # ticker -> product page URL
+_SCREENER_FULL = None     # ticker -> full screener record
+def _load_ishares_screener():
+    global _SCREENER, _SCREENER_FULL
+    if _SCREENER is not None:
+        return
+    _SCREENER, _SCREENER_FULL = {}, {}
+    try:
+        for pid, v in http_get(SCREENER).json().items():
+            t = v.get("localExchangeTicker")
+            if not t:
+                continue
+            page = v.get("productPageUrl") or ""
+            _SCREENER[t] = ("https://www.ishares.com" + page) if page.startswith("/") else (page or f"https://www.ishares.com/us/products/{pid}")
+            v = dict(v); v["_pid"] = pid
+            _SCREENER_FULL[t] = v
+    except Exception as e:
+        log("screener failed", e)
+
 def ishares_page(fund):
-    global _SCREENER
-    if _SCREENER is None:
-        _SCREENER = {}
-        try:
-            for pid, v in http_get(SCREENER).json().items():
-                if v.get("localExchangeTicker"):
-                    _SCREENER[v["localExchangeTicker"]] = "https://www.ishares.com" + v["productPageUrl"]
-        except Exception as e:
-            log("screener failed", e)
+    _load_ishares_screener()
     return _SCREENER.get(fund)
 
 _FUND_CACHE = {}
@@ -578,7 +589,174 @@ def build_market(mid, cfg, do_fund, info_cache):
     else:
         D["fund_exposure"] = []
     D["gaps"] = gaps
+    attach_fees_to_market(D)
     return D
+
+
+# ================================================================ ETF expense ratios
+# Net expense ratio / TER is already accrued into NAV and market price daily, so the stored
+# price series is net of fees. We still record the published annual fee so the UI can (a) show
+# it next to each ETF and (b) offer a "gross of fees" comparison chart that adds the fee back.
+_ETF_FEES = None  # ticker -> {pct, source, as_of, url, name}  (pct is annual percent points, e.g. 0.59)
+
+def all_configured_etf_tickers():
+    out = set()
+    for cfg in MARKETS.values():
+        if cfg.get("fallback"):
+            out.add(cfg["fallback"])
+        for e in cfg.get("etfs") or []:
+            out.add(e)
+        for e in (cfg.get("sector_etfs") or {}).values():
+            out.add(e)
+        for e in cfg.get("regional") or []:
+            out.add(e)
+        if cfg.get("index_kind") == "etf" and cfg.get("index"):
+            out.add(cfg["index"]["ticker"])
+    return sorted(out)
+
+def _fee_from_ishares(ticker):
+    _load_ishares_screener()
+    v = (_SCREENER_FULL or {}).get(ticker)
+    if not v:
+        return None
+    fees = v.get("fees") or v.get("ter") or v.get("ter_ocf") or {}
+    pct = fees.get("r") if isinstance(fees, dict) else None
+    if not isinstance(pct, (int, float)):
+        return None
+    return {"pct": round(float(pct), 4),
+            "source": "iShares product screener (fees/TER)",
+            "as_of": dt.date.today().isoformat(),
+            "url": _SCREENER.get(ticker) or f"https://www.ishares.com/us/products/{v.get('_pid', '')}",
+            "name": v.get("fundName")}
+
+def _fee_from_globalx(ticker):
+    """Parse Total Expense Ratio from the Global X fund page (issuer)."""
+    page = f"https://www.globalxetfs.com/funds/{ticker.lower()}/"
+    try:
+        r = http_get(page, timeout=30)
+        if r.status_code != 200:
+            return None
+        m = re.search(r'"label"\s*:\s*"Total Expense Ratio"\s*,\s*"value"\s*:\s*"([0-9.]+)\s*%"', r.text)
+        if not m:
+            m = re.search(r'Total Expense Ratio[^%]{0,80}?([0-9]+(?:\.[0-9]+)?)\s*%', r.text)
+        if not m:
+            return None
+        return {"pct": round(float(m.group(1)), 4),
+                "source": "Global X fund page (Total Expense Ratio)",
+                "as_of": dt.date.today().isoformat(),
+                "url": page,
+                "name": None}
+    except Exception as e:
+        log("  globalx fee failed", ticker, e)
+        return None
+
+def _fee_from_yfinance(ticker):
+    try:
+        info = yf.Ticker(ticker).info or {}
+        ner = info.get("netExpenseRatio")
+        if isinstance(ner, (int, float)):
+            return {"pct": round(float(ner), 4),
+                    "source": "Yahoo Finance (netExpenseRatio)",
+                    "as_of": dt.date.today().isoformat(),
+                    "url": f"https://finance.yahoo.com/quote/{ticker}/",
+                    "name": info.get("longName") or info.get("shortName")}
+        try:
+            fo = yf.Ticker(ticker).funds_data.fund_operations
+            if hasattr(fo, "loc") and ticker in getattr(fo, "columns", []):
+                val = fo.loc["Annual Report Expense Ratio", ticker]
+                if isinstance(val, (int, float)) and val == val:
+                    return {"pct": round(float(val) * 100, 4),
+                            "source": "Yahoo Finance funds_data (Annual Report Expense Ratio)",
+                            "as_of": dt.date.today().isoformat(),
+                            "url": f"https://finance.yahoo.com/quote/{ticker}/",
+                            "name": info.get("longName") or info.get("shortName")}
+        except Exception:
+            pass
+    except Exception as e:
+        log("  yfinance fee failed", ticker, e)
+    return None
+
+def fetch_expense_ratios(tickers=None, force=False):
+    """Fetch published annual expense ratios for the given ETF tickers. Never invents a value."""
+    global _ETF_FEES
+    if _ETF_FEES is not None and not force and tickers is None:
+        return _ETF_FEES
+    want = list(tickers) if tickers is not None else all_configured_etf_tickers()
+    out = dict(_ETF_FEES or {})
+    # prefer issuer sources
+    gx = {"ARGT", "GREK", "COLO"}
+    for t in want:
+        if t in out and out[t].get("pct") is not None and not force:
+            continue
+        entry = None
+        if t in gx:
+            entry = _fee_from_globalx(t)
+        if entry is None:
+            entry = _fee_from_ishares(t)
+        if entry is None:
+            entry = _fee_from_yfinance(t)
+            time.sleep(0.08)
+        if entry is None:
+            entry = {"pct": None, "source": None, "as_of": dt.date.today().isoformat(),
+                     "url": None, "name": None, "note": "לא זמין"}
+        out[t] = entry
+        log(f"  fee {t}: {entry.get('pct')}% from {entry.get('source') or 'לא זמין'}")
+    _ETF_FEES = out
+    return out
+
+def fee_obj(ticker, fees=None):
+    fees = fees or _ETF_FEES or {}
+    e = fees.get(ticker)
+    if not e:
+        return {"pct": None, "source": None, "as_of": None, "note": "לא זמין"}
+    return {k: e.get(k) for k in ("pct", "source", "as_of", "url", "name", "note") if e.get(k) is not None or k in ("pct", "source", "as_of")}
+
+def attach_fees_to_market(D, fees=None):
+    """Attach expense_ratio objects to every ETF object in a market JSON. Idempotent."""
+    fees = fees or fetch_expense_ratios()
+    catalog = {}
+    def put(ticker):
+        if not ticker:
+            return None
+        fo = fee_obj(ticker, fees)
+        catalog[ticker] = fo
+        return fo
+    ix = D.get("index")
+    if ix and ix.get("kind") == "etf":
+        ix["expense_ratio"] = put(ix.get("ticker"))
+    for e in D.get("extra_series") or []:
+        t = e.get("ticker")
+        # extra_series entries for ETFs are labelled "קרן סל …"; skip FX/index-USD derivatives
+        if t and ("קרן סל" in (e.get("label") or "") or t in fees or t in all_configured_etf_tickers()):
+            if " USD" in t or t.startswith("^"):
+                continue
+            e["expense_ratio"] = put(t)
+            e["kind"] = e.get("kind") or "etf"
+    sec = D.get("sectors")
+    if sec:
+        if sec.get("fund"):
+            sec["expense_ratio"] = put(sec["fund"])
+        for it in sec.get("items") or []:
+            ch = it.get("chart") or {}
+            if ch.get("kind") == "etf" and ch.get("ticker"):
+                ch["expense_ratio"] = put(ch["ticker"])
+            for o in it.get("other_funds") or []:
+                if o.get("fund"):
+                    o["expense_ratio"] = put(o["fund"])
+    for f in D.get("fund_exposure") or []:
+        if f.get("fund"):
+            f["expense_ratio"] = put(f["fund"])
+    D["etf_fees"] = catalog
+    return D
+
+def write_etf_fees_catalog(fees):
+    payload = {"generated_at": now_iso(),
+               "note": "Annual net expense ratio / TER in percent points (0.59 = 0.59%/year). Already accrued into NAV/price.",
+               "fees": fees}
+    open(data_path("etf_fees.json"), "w", encoding="utf-8").write(js_dump(clean_nan(payload)))
+    log("etf_fees.json", f"{os.path.getsize(data_path('etf_fees.json'))/1024:.1f} KB,",
+        sum(1 for v in fees.values() if v.get("pct") is not None), "with fee,",
+        sum(1 for v in fees.values() if v.get("pct") is None), "unavailable")
 
 # ================================================================ output
 def js_dump(o):
@@ -663,6 +841,16 @@ def build_returns(ids):
             m["label_loc"] = f"{ix.get('name_he')} ({ix['currency']})"
         if ix and ix.get("kind") == "etf":
             m["flags"].append(f"קרן סל ({ix.get('ticker')}) ולא המדד עצמו")
+            er = (ix.get("expense_ratio") or {})
+            if er.get("pct") is not None:
+                m["expense_ratio"] = {"pct": er["pct"], "source": er.get("source"), "as_of": er.get("as_of")}
+            elif (D.get("etf_fees") or {}).get(ix.get("ticker"), {}).get("pct") is not None:
+                m["expense_ratio"] = D["etf_fees"][ix["ticker"]]
+            else:
+                # look up from global fee cache if present
+                fo = fee_obj(ix.get("ticker")) if ix.get("ticker") else None
+                if fo and fo.get("pct") is not None:
+                    m["expense_ratio"] = fo
         if D.get("currency") != "USD" and "loc" not in [b for (x, b) in raw if x == mid]:
             m["flags"].append("אין סדרה במטבע מקומי — גם בבסיס \"מטבע מקומי\" מחושב בדולר")
         if ix and ix.get("kind") != "etf" and D.get("currency") != "USD":
@@ -740,14 +928,31 @@ def main():
     ids = args or list(MARKETS)
     os.makedirs(os.path.join(ROOT, "data"), exist_ok=True)
     failures = 0
-    if "--build-only" in sys.argv:
+    if "--fees-only" in sys.argv:
+        # Refresh expense ratios and inject into existing market JSON without re-downloading prices.
+        fees = fetch_expense_ratios(force=True)
+        write_etf_fees_catalog(fees)
+        for mid in ids:
+            D = load_previous(mid)
+            if not D:
+                continue
+            attach_fees_to_market(D, fees)
+            write_outputs(mid, D)
+            log("  fees attached", mid, f"{os.path.getsize(data_path(mid + '.json'))/1024:.0f} KB")
+    elif "--build-only" in sys.argv:
+        fees = fetch_expense_ratios()
+        write_etf_fees_catalog(fees)
         for mid in ids:
             D = load_previous(mid)
             if D:
+                attach_fees_to_market(D, fees)
                 write_outputs(mid, D)
     else:
         do_fund = "--no-fundamentals" not in sys.argv
         cache = load_info_cache()
+        # Prefetch fees once so every market reuses the same catalog
+        fees = fetch_expense_ratios()
+        write_etf_fees_catalog(fees)
         for mid in ids:
             if mid not in MARKETS:
                 log("unknown market", mid); continue

@@ -60,7 +60,70 @@
     const c = [D.index && S(D.index.series), D.market_usd && S(D.market_usd.series), D.fx && D.fx[0] && S(D.fx[0].series)].find(Boolean);
     return c ? c.d[c.d.length - 1] : new Date().toISOString().slice(0, 10);
   }
+
   const marketStart = D => startDate(lastDate(D), range);
+
+  // ---------------------------------------------------------------- ETF expense ratios
+  // Published annual net expense ratio is already accrued into NAV/price. "net" view = actual investor result
+  // (existing series). "gross" view adds the fee back from the window start: P_gross = P_net * (1+ER)^(days/365).
+  let feeMode = "net";   // "net" | "gross"
+  function feePct(obj) {
+    const er = obj && obj.expense_ratio;
+    return (er && typeof er.pct === "number" && isFinite(er.pct)) ? er.pct : null;
+  }
+  function feeLabel(obj, opts) {
+    const er = obj && obj.expense_ratio;
+    if (!er) return "";
+    const short = opts && opts.short;
+    if (er.pct == null || !isFinite(er.pct)) return short ? `דמי ניהול: ${NA}` : ` · דמי ניהול: ${NA}`;
+    const src = er.source ? ` · מקור: ${esc(er.source)}${er.as_of ? ", נכון ל-" + dateHe(er.as_of) : ""}` : "";
+    if (short) return `דמי ניהול <span class="ltr">${fmt(er.pct, 2)}%</span> לשנה`;
+    return ` · <b>דמי ניהול <span class="ltr">${fmt(er.pct, 2)}%</span> לשנה</b>${src}`;
+  }
+  function feeNote() {
+    return `<p class="note fee-note">דמי הניהול של תעודת סל כבר מגולמים במחיר וב-NAV (נצברים יומית) — הגרף <b>כולל דמי ניהול (מחיר בפועל)</b> הוא מה שהמשקיע קיבל. הגרף <b>ללא דמי ניהול (ברוטו)</b> מוסיף בחזרה את דמי הניהול השנתיים באופן יחסי לימים מתחילת הטווח, לצורך השוואה למדד/מניות בלי דמי ניהול. מדדי מחיר אינם כוללים דיבידנדים; מחירי Yahoo מותאמים (כוללים דיבידנדים/פיצולים).</p>`;
+  }
+  function feeToggleHtml(id) {
+    return `<div class="ctl fee-ctl" data-fee-for="${id}">
+      <span class="lbl">השוואת דמי ניהול:</span>
+      <div class="seg fee-seg" role="group" aria-label="מצב דמי ניהול">
+        <button type="button" data-m="net" class="${feeMode === "net" ? "on" : ""}">כולל דמי ניהול (מחיר בפועל)</button>
+        <button type="button" data-m="gross" class="${feeMode === "gross" ? "on" : ""}">ללא דמי ניהול (ברוטו)</button>
+      </div></div>`;
+  }
+  function bindFeeToggles(root) {
+    (root || document).querySelectorAll(".fee-seg button").forEach(b => {
+      b.onclick = () => {
+        feeMode = b.dataset.m;
+        document.querySelectorAll(".fee-seg button").forEach(x => x.classList.toggle("on", x.dataset.m === feeMode));
+        drawAll();
+        if (current) corrDraw(current);
+      };
+    });
+  }
+  function grossUp(s, erPct, t0) {
+    // s = {d,v} already cut; erPct in percent points (0.59). Relative to window start t0 (or first point).
+    if (!s || !s.d.length || erPct == null || !isFinite(erPct) || feeMode !== "gross") return s;
+    const er = erPct / 100;
+    const t0ms = Date.parse((t0 || s.d[0]) + "T00:00:00Z");
+    return {
+      d: s.d,
+      v: s.v.map((v, i) => {
+        const days = (Date.parse(s.d[i] + "T00:00:00Z") - t0ms) / 864e5;
+        return +(v * Math.pow(1 + er, days / 365)).toFixed(6);
+      }),
+    };
+  }
+  function marketHasComparableFees(D) {
+    // true when at least one ETF with a known fee is charted against a non-fee series (index/proxy/market)
+    const fees = D.etf_fees || {};
+    const hasFee = t => fees[t] && fees[t].pct != null;
+    if ((D.extra_series || []).some(e => e.expense_ratio && e.expense_ratio.pct != null)) return true;
+    if (D.index && D.index.kind === "etf" && feePct(D.index) != null && (D.extra_series || []).length) return true;
+    if ((D.sectors && D.sectors.items || []).some(s => s.chart && s.chart.kind === "etf" && feePct(s.chart) != null)) return true;
+    return Object.keys(fees).some(t => hasFee(t));
+  }
+
 
   // ---------------------------------------------------------------- mobile / chart config
   const MQ = window.matchMedia ? window.matchMedia("(max-width: 700px)") : { matches: false };
@@ -119,17 +182,19 @@
       <div class="kv"><span><b>עודכן:</b> ${dtHe(D.generated_at)}</span><span><b>מטבע מקומי:</b> ${esc(D.currency)}</span><span><b>טווח מוצג:</b> <span id="rangeLbl">${RANGE_HE[range]}</span></span></div>
       <div id="liveBanner" class="live ${D._live ? D._live.cls : "pending"}">${D._live ? D._live.html : "מרענן נתוני מחירים חיים…"}</div>
       ${D.index_note ? `<p class="note">${esc(D.index_note)}</p>` : ""}
-      <p class="muted" style="font-size:13px">הערת מטבע: המדד המקומי מוצג במטבע ${esc(D.currency)}; קרנות סל אמריקאיות, גרפי הסקטורים וההשוואה ביניהם מוצגים בדולר (USD), ולכן כוללים את השפעת שער החליפין. מחירי Yahoo "מותאמים" (כוללים התאמת דיבידנדים/פיצולים). הנקודה האחרונה עשויה להיות תוך-יומית.</p>
+      <p class="muted" style="font-size:13px">הערת מטבע: המדד המקומי מוצג במטבע ${esc(D.currency)}; קרנות סל אמריקאיות, גרפי הסקטורים וההשוואה ביניהם מוצגים בדולר (USD), ולכן כוללים את השפעת שער החליפין. מחירי Yahoo "מותאמים" (כוללים התאמת דיבידנדים/פיצולים). דמי ניהול של תעודות סל כבר מגולמים במחיר. הנקודה האחרונה עשויה להיות תוך-יומית.</p>
       <div class="toc"><a href="#s-main">מדד מוביל</a><a href="#s-pie">התפלגות סקטורים</a><a href="#s-sectors">סקטורים</a><a href="#s-all">כל הסקטורים יחד</a><a href="#s-corr">מתאם עם שווקים אחרים</a><a href="#s-src">מקורות ופערים</a></div></section>`;
 
     // main chart
     const L = seriesList(D);
     if (L.length) {
+      const mainFeeToggle = marketHasComparableFees(D) && (L.some(o => feePct(o.obj) != null));
       h += `<section class="card" id="s-main"><h2>${!ix ? "שער החליפין (אין מדד או קרן זמינים)" : ix.kind === "etf" ? "קרן סל מייצגת (המדד לא זמין)" : "המדד המוביל"}${ix ? ": " + esc(ix.name_he) : ""}</h2>
         <div class="ctl"><label>סדרה: <select id="mainSel">${L.map(o => `<option value="${o.k}">${esc(o.label)}</option>`).join("")}</select></label>
         <label><input type="checkbox" id="mainNorm"> השוואה מנורמלת (100) של כל הסדרות</label></div>
+        ${mainFeeToggle ? feeToggleHtml("main") + feeNote() : ""}
         <div id="chMain" class="chart"></div>
-        <div class="src">${ix ? `מקור: ${esc(ix.source)} · טיקר ${esc(ix.ticker)} · נמשך ${dtHe(ix.fetched_at)}${ix.kind === "etf" ? " · <b>שימו לב: זו קרן סל ולא המדד עצמו</b>" : ""}` : "מקור: Yahoo Finance (yfinance). <b>מדד ומחירי קרן לשוק זה לא זמינים</b> — ראו פערים."}</div>
+        <div class="src">${ix ? `מקור: ${esc(ix.source)} · טיקר ${esc(ix.ticker)} · נמשך ${dtHe(ix.fetched_at)}${ix.kind === "etf" ? " · <b>שימו לב: זו קרן סל ולא המדד עצמו</b>" + feeLabel(ix) : ""}${(D.extra_series || []).filter(e => e.expense_ratio).map(e => ` · ${esc(e.ticker)}${feeLabel(e)}`).join("")}` : "מקור: Yahoo Finance (yfinance). <b>מדד ומחירי קרן לשוק זה לא זמינים</b> — ראו פערים."}</div>
         <h3 style="margin-top:14px">תשואות לפי טווח (שינוי מחיר מצטבר)</h3>
         <div class="tablewrap"><table>${RET_HEAD}${L.map(o => retRow(esc(o.label), o.r, srcTag(o.obj))).join("")}</table></div>
         <div class="src">חישוב מתוך סדרות Yahoo Finance לעיל. תנודתיות = סטיית תקן של תשואות יומיות בשנה האחרונה × √252. עליית שער ${esc(D.currency)}=X = היחלשות ה-${esc(D.currency)} מול הדולר.</div>
@@ -142,11 +207,11 @@
     if (sec) {
       const exp = D.fund_exposure || [];
       h += `<section class="card" id="s-pie"><div class="grid2"><div><h2>התפלגות סקטורים לפי שווי שוק</h2><div id="chPie" class="chart"></div></div>
-        <div><h3>חשיפה ל${esc(D.name_he)} בקרנות סל אזוריות/גלובליות</h3>${exp.length ? `<div class="tablewrap"><table><tr><th>קרן</th><th>משקל מניות ${esc(D.name_he)} בקרן</th><th>מובילות (משקל בקרן)</th><th>נכון ל</th></tr>
-        ${exp.map(f => `<tr><td>${link(f.page, f.fund)} — ${esc(f.name)}</td><td class="num">${pct(f.country_weight, 2, false)}</td><td>${f.top.slice(0, 3).map(t => `${esc(t.name)} ${fmt(t.weight, 2)}%`).join(", ") || NA}</td><td>${esc(f.as_of)}</td></tr>`).join("")}</table></div>
-        <div class="src">מקור: קבצי אחזקות iShares (latest-holdings.csv) — שדה Location, רכיב המניות בלבד (ללא מזומן/נגזרים).</div>` : `<p>${NA}</p>`}
+        <div><h3>חשיפה ל${esc(D.name_he)} בקרנות סל אזוריות/גלובליות</h3>${exp.length ? `<div class="tablewrap"><table><tr><th>קרן</th><th>משקל מניות ${esc(D.name_he)} בקרן</th><th>דמי ניהול</th><th>מובילות (משקל בקרן)</th><th>נכון ל</th></tr>
+        ${exp.map(f => `<tr><td>${link(f.page, f.fund)} — ${esc(f.name)}</td><td class="num">${pct(f.country_weight, 2, false)}</td><td class="num">${feePct(f) != null ? `<span class="ltr">${fmt(feePct(f), 2)}%</span>/שנה` : NA}</td><td>${f.top.slice(0, 3).map(t => `${esc(t.name)} ${fmt(t.weight, 2)}%`).join(", ") || NA}</td><td>${esc(f.as_of)}</td></tr>`).join("")}</table></div>
+        <div class="src">מקור: קבצי אחזקות iShares (latest-holdings.csv) — שדה Location, רכיב המניות בלבד (ללא מזומן/נגזרים). דמי ניהול = TER/Net Expense Ratio כפי שפורסם (כבר מגולמים במחיר).</div>` : `<p>${NA}</p>`}
         <h3>טבלת משקלים</h3><div class="tablewrap"><table><tr><th>סקטור</th><th>משקל</th><th>מס׳ מניות</th></tr>${sec.items.map(s => `<tr><td>${esc(s.sector_he)}</td><td class="num">${fmt(s.weight, 2)}%</td><td class="num">${s.is_equity ? s.n : "—"}</td></tr>`).join("")}</table></div></div></div>
-        <div class="src">מקור: ${link(sec.page, `${sec.fund_name} (${sec.fund})`)} — נכון ל-${esc(sec.as_of)}; ${esc(sec.basis)}. נמשך ${dtHe(sec.fetched_at)}. הקרן היא ייצוג של השוק (מדד MSCI/Solactive/אחר של הקרן), לא כל המניות הנסחרות בבורסה.</div>
+        <div class="src">מקור: ${link(sec.page, `${sec.fund_name} (${sec.fund})`)} — נכון ל-${esc(sec.as_of)}; ${esc(sec.basis)}. נמשך ${dtHe(sec.fetched_at)}.${feeLabel(sec)} הקרן היא ייצוג של השוק (מדד MSCI/Solactive/אחר של הקרן), לא כל המניות הנסחרות בבורסה.</div>
         ${sec.member_note ? `<div class="src">${esc(sec.member_note)}</div>` : ""}</section>`;
     } else {
       h += `<section class="card" id="s-pie"><h2>התפלגות סקטורים</h2><p>${NA} — ${esc((D.gaps || []).find(g => g.startsWith("פילוח")) || "אין מקור פילוח זמין")}</p></section>`;
@@ -162,24 +227,27 @@
       h += `<div class="sector" id="sec-${i}"><h3><span class="dot" style="background:${COLORS[i % COLORS.length]}"></span>${esc(s.sector_he)} — ${fmt(s.weight, 2)}% מהשוק (לפי ${esc(sec.fund)})</h3>
         <p><b>הרכב:</b> ${s.n} מניות בסקטור בקרן ${esc(sec.fund)}, המהוות ${fmt(s.weight, 2)}% ממשקלה.${s.top3_share_of_sector != null ? ` שלוש הגדולות מרכזות ${fmt(s.top3_share_of_sector, 1)}% מהסקטור.` : ""}</p>
         <p><b>מניות מובילות:</b> ${tops.length ? tops.map(t => `${esc(t.name)} (${esc(t.ticker)}) — ${fmt(t.weight, 2)}%`).join(" · ") : NA}</p>
-        <p><b>קרנות סל עם חשיפה לסקטור:</b> ${esc(sec.fund)} — ${fmt(s.weight, 2)}% מהקרן${others.map(o => ` · ${esc(o.fund)} (${esc(o.name)}) — רכיב ${esc(D.name_he)}/${esc(s.sector_he)} = ${fmt(o.weight, 2)}% מהקרן`).join("")}${ch && ch.kind === "etf" ? ` · קרן סקטור ייעודית: ${esc(ch.ticker)}` : ""}.</p>
+        <p><b>קרנות סל עם חשיפה לסקטור:</b> ${esc(sec.fund)} — ${fmt(s.weight, 2)}% מהקרן${feePct(sec) != null ? ` (${feeLabel(sec, {short:true})})` : ""}${others.map(o => ` · ${esc(o.fund)} (${esc(o.name)}) — רכיב ${esc(D.name_he)}/${esc(s.sector_he)} = ${fmt(o.weight, 2)}% מהקרן${feePct(o) != null ? ` · ${feeLabel(o, {short:true})}` : ""}`).join("")}${ch && ch.kind === "etf" ? ` · קרן סקטור ייעודית: ${esc(ch.ticker)}${feeLabel(ch)}` : ""}.</p>
         <div class="tablewrap"><table><tr><th>מניה</th><th>טיקר Yahoo</th><th>משקל בקרן</th><th>שווי שוק</th><th>מכפיל רווח (12ח׳)</th><th>תשואת דיבידנד</th><th>תשואה שנה (מטבע מקומי)</th></tr>
         ${tops.map(t => `<tr><td>${esc(t.name)}</td><td class="ltr">${t.yahoo ? esc(t.yahoo) : NA}</td><td class="num">${fmt(t.weight, 2)}%</td><td class="num">${big(t.marketCap, t.mcap_ccy)}</td><td class="num">${t.pe != null ? fmt(t.pe, 1) : NA}</td><td class="num">${t.divYield != null ? fmt(t.divYield, 2) + "%" : NA}</td><td class="num">${pct(t.ret1Y)}</td></tr>`).join("")}</table></div>
         ${sec.fundamentals_source ? `<div class="src">שווי שוק / מכפיל / דיבידנד: ${esc(sec.fundamentals_source)}.</div>` : ""}
-        <p><b>נתונים נוספים:</b> ${ch ? `${ch.kind === "etf" ? "קרן הסקטור" : "סל הפרוקסי"} (USD) — תשואה בשנה ${pct(ch.returns["1Y"])}, ב-5 שנים ${pct(ch.returns["5Y"])}, תנודתיות שנתית ${pct(ch.returns.vol1Y, 1, false)}, ירידה מקסימלית בשנה ${pct(ch.returns.maxDD1Y, 1)}.` : NA}</p>
+        <p><b>נתונים נוספים:</b> ${ch ? `${ch.kind === "etf" ? "קרן הסקטור" : "סל הפרוקסי"} (USD) — תשואה בשנה ${pct(ch.returns["1Y"])}, ב-5 שנים ${pct(ch.returns["5Y"])}, תנודתיות שנתית ${pct(ch.returns.vol1Y, 1, false)}, ירידה מקסימלית בשנה ${pct(ch.returns.maxDD1Y, 1)}${ch.kind === "etf" ? `. ${feeLabel(ch, {short:true})} (כבר מגולמים במחיר)` : ""}.` : NA}</p>
+        ${ch && ch.kind === "etf" && feePct(ch) != null ? feeToggleHtml("sec" + i) : ""}
         <div id="chSec${i}" class="chart sm"></div>
-        <div class="src">${ch ? `<b>${esc(ch.label)}.</b> ${esc(ch.method)}${ch.kind === "proxy" ? ` ${ch.n_used} ניירות; כיסוי משקל ביום האחרון ${fmt(ch.coverage_last, 1)}%.` : ""} מטבע: ${esc(ch.currency)}.${ch.kind === "proxy" ? ` <b>סדרה מוטמעת (לא מתרעננת חי), עד ${dateHe(ch.returns && ch.returns.last_date)}.</b>` : ch._live ? " <b>עודכן חי.</b>" : ""}` : "גרף: לא זמין — חסרים נתוני מחיר לרכיבים."}</div>
+        <div class="src">${ch ? `<b>${esc(ch.label)}.</b> ${esc(ch.method)}${ch.kind === "proxy" ? ` ${ch.n_used} ניירות; כיסוי משקל ביום האחרון ${fmt(ch.coverage_last, 1)}%.` : ""}${ch.kind === "etf" ? feeLabel(ch) : ""} מטבע: ${esc(ch.currency)}.${ch.kind === "proxy" ? ` <b>סדרה מוטמעת (לא מתרעננת חי), עד ${dateHe(ch.returns && ch.returns.last_date)}.</b>` : ch._live ? " <b>עודכן חי.</b>" : ""}` : "גרף: לא זמין — חסרים נתוני מחיר לרכיבים."}</div>
       </div>`;
     });
     h += `</section>`;
 
-    h += `<section class="card" id="s-all"><h2>כל הסקטורים יחד מול השוק (מנורמל ל-100, USD)</h2>${eqItems.some(s => s.chart) && D.market_usd && D.market_usd.series ? `<div id="chAll" class="chart" style="height:480px"></div>
-      <div class="src">סקטורים = ${D.sectors.items.some(s => s.chart && s.chart.kind === "etf") ? "קרנות סקטור" : "סלי פרוקסי מחושבים (ראו שיטה בכל סקטור)"}; קו השוק = ${esc(D.market_usd.label)}. כולם בדולר. לחיצה על פריט במקרא מסתירה/מציגה אותו.</div>` : `<p>${NA}</p>`}</section>`;
+    const allHasEtfFee = eqItems.some(s => s.chart && s.chart.kind === "etf" && feePct(s.chart) != null);
+    h += `<section class="card" id="s-all"><h2>כל הסקטורים יחד מול השוק (מנורמל ל-100, USD)</h2>${eqItems.some(s => s.chart) && D.market_usd && D.market_usd.series ? `${allHasEtfFee ? feeToggleHtml("all") + feeNote() : ""}<div id="chAll" class="chart" style="height:480px"></div>
+      <div class="src">סקטורים = ${D.sectors.items.some(s => s.chart && s.chart.kind === "etf") ? "קרנות סקטור" : "סלי פרוקסי מחושבים (ראו שיטה בכל סקטור)"}; קו השוק = ${esc(D.market_usd.label)}. כולם בדולר. לחיצה על פריט במקרא מסתירה/מציגה אותו.${allHasEtfFee ? " במצב ברוטו מתווספים דמי הניהול של קרנות הסקטור בלבד (למדד/שוק אין דמי ניהול)." : ""}</div>` : `<p>${NA}</p>`}</section>`;
 
     h += corrSection(D);
 
     const srcs = [];
     srcs.push("<li>מחירים, מדדים ושערי חליפין: Yahoo Finance דרך yfinance (מחירי סגירה מותאמים).</li>");
+    srcs.push("<li>דמי ניהול של תעודות סל: iShares product screener (fees/TER), עמודי Global X, או Yahoo Finance netExpenseRatio — כבר מגולמים במחיר/NAV; מוצגים ליד כל קרן. ערך שלא נמצא = לא זמין.</li>");
     if (sec) {
       srcs.push(`<li>משקלי סקטורים: ${link(sec.url, sec.url)} (נכון ל-${esc(sec.as_of)}).</li>`);
       if (sec.holdings_url !== sec.url) srcs.push(`<li>רכיבי הקרן: ${link(sec.holdings_url, sec.holdings_url)} (נכון ל-${esc(sec.holdings_as_of)}).</li>`);
@@ -193,6 +261,7 @@
     if ($("#mainSel") && keepSel && D._rerender) { $("#mainSel").value = keepSel; $("#mainNorm").checked = keepNorm; }
     D._rerender = false;
     if ($("#mainSel")) { $("#mainSel").onchange = drawMain; $("#mainNorm").onchange = drawMain; }
+    bindFeeToggles($("#app"));
     drawAll();
     corrSetup(D);
     if (!D._live && !D._liveRunning) liveRefresh(D);
@@ -211,11 +280,19 @@
     const D = current, st = marketStart(D), L = seriesList(D);
     if (!L.length) return;
     if ($("#mainNorm").checked) {
-      Plotly.react("chMain", L.map((o, i) => line(rebase(cut(S(o.s), st)), o.label, COLORS[i % COLORS.length])), LAYOUT(`השוואה מנורמלת — ${RANGE_HE[range]}`, "100 = תחילת הטווח"), CFG());
+      const modeHe = feeMode === "gross" ? " · ברוטו מדמי ניהול" : "";
+      Plotly.react("chMain", L.map((o, i) => {
+        let s = cut(S(o.s), st);
+        const t0 = s.d[0];
+        s = grossUp(s, feePct(o.obj), t0);
+        const lab = o.label + (feePct(o.obj) != null && feeMode === "gross" ? " (ברוטו)" : "");
+        return line(rebase(s), lab, COLORS[i % COLORS.length]);
+      }), LAYOUT(`השוואה מנורמלת — ${RANGE_HE[range]}${modeHe}`, "100 = תחילת הטווח"), CFG());
       return;
     }
     const o = L.find(x => x.k === $("#mainSel").value) || L[0];
-    const s = cut(S(o.s), st);
+    let s = cut(S(o.s), st);
+    // single-series view stays on actual (net) price — fee is already in the price; gross only meaningful in comparisons
     const lay = LAYOUT(`${o.label} — ${RANGE_HE[range]}`, "רמה");
     if (s.v.length) { let mn = Infinity, mx = -Infinity; s.v.forEach(x => { if (x < mn) mn = x; if (x > mx) mx = x; }); const pad = (mx - mn) * 0.05 || 1; lay.yaxis.range = [mn - pad, mx + pad]; }
     Plotly.react("chMain", [line(s, o.label, COLORS[0], { fill: "tozeroy", fillcolor: "rgba(31,111,235,0.06)" })], lay, CFG());
@@ -245,9 +322,19 @@
       const cs = S(s.chart.series);
       let first = cut(cs, st).d[0] || st.toISOString().slice(0, 10);
       if (mk) { const m0 = cut(mk, st).d[0]; if (m0 && m0 > first) first = m0; }
-      const tr = [line(rebase(cut(cs, first)), s.chart.kind === "etf" ? s.chart.ticker : `פרוקסי ${s.sector_he}`, COLORS[i % COLORS.length], { line: { width: 2.2, color: COLORS[i % COLORS.length] } })];
-      if (mk) tr.push(line(rebase(cut(mk, first)), D.market_usd.label + " (USD)", "#868e96", { line: { width: 1.4, dash: "dot", color: "#868e96" } }));
-      Plotly.react(el, tr, LAYOUT(`${s.sector_he} — ${s.chart.kind === "etf" ? "קרן סקטור" : "פרוקסי מחושב"} מול השוק (USD), ${RANGE_HE[range]}`, "100 = תחילת הטווח"), CFG());
+      let secS = cut(cs, first);
+      secS = grossUp(secS, feePct(s.chart), first);
+      const secName = (s.chart.kind === "etf" ? s.chart.ticker : `פרוקסי ${s.sector_he}`) + (s.chart.kind === "etf" && feeMode === "gross" && feePct(s.chart) != null ? " (ברוטו)" : "");
+      const tr = [line(rebase(secS), secName, COLORS[i % COLORS.length], { line: { width: 2.2, color: COLORS[i % COLORS.length] } })];
+      if (mk) {
+        // market line: gross-up only if market itself is an ETF with a fee
+        let mS = cut(mk, first);
+        const mEr = (D.index && D.index.kind === "etf" && D.market_usd && D.market_usd.ticker === D.index.ticker) ? feePct(D.index) : null;
+        mS = grossUp(mS, mEr, first);
+        tr.push(line(rebase(mS), D.market_usd.label + " (USD)" + (mEr != null && feeMode === "gross" ? " (ברוטו)" : ""), "#868e96", { line: { width: 1.4, dash: "dot", color: "#868e96" } }));
+      }
+      const modeHe = (s.chart.kind === "etf" && feePct(s.chart) != null) ? (feeMode === "gross" ? " · ברוטו מדמי ניהול" : " · כולל דמי ניהול") : "";
+      Plotly.react(el, tr, LAYOUT(`${s.sector_he} — ${s.chart.kind === "etf" ? "קרן סקטור" : "פרוקסי מחושב"} מול השוק (USD), ${RANGE_HE[range]}${modeHe}`, "100 = תחילת הטווח"), CFG());
       });
     });
   }
@@ -259,9 +346,18 @@
     const items = D.sectors.items.filter(s => s.chart);
     let first = cut(mk, st).d[0];
     items.forEach(s => { const c = cut(S(s.chart.series), st); if (c.d.length && c.d[0] > first) first = c.d[0]; });
-    const tr = items.map(s => line(rebase(cut(S(s.chart.series), first)), s.sector_he + (s.chart.kind === "etf" ? ` (${s.chart.ticker})` : ""), COLORS[D.sectors.items.indexOf(s) % COLORS.length]));
-    tr.push(line(rebase(cut(mk, first)), D.market_usd.label, "#111", { line: { width: 3, color: "#111" } }));
-    Plotly.react("chAll", tr, LAYOUT(`כל הסקטורים מול השוק — ${RANGE_HE[range]} (מ-${dateHe(first)})`, "100 = תחילת הטווח"), CFG());
+    const tr = items.map(s => {
+      let secS = cut(S(s.chart.series), first);
+      secS = grossUp(secS, feePct(s.chart), first);
+      const lab = s.sector_he + (s.chart.kind === "etf" ? ` (${s.chart.ticker})` : "") + (s.chart.kind === "etf" && feeMode === "gross" && feePct(s.chart) != null ? " ברוטו" : "");
+      return line(rebase(secS), lab, COLORS[D.sectors.items.indexOf(s) % COLORS.length]);
+    });
+    let mS = cut(mk, first);
+    const mEr = (D.index && D.index.kind === "etf" && D.market_usd && D.market_usd.ticker === D.index.ticker) ? feePct(D.index) : null;
+    mS = grossUp(mS, mEr, first);
+    tr.push(line(rebase(mS), D.market_usd.label + (mEr != null && feeMode === "gross" ? " (ברוטו)" : ""), "#111", { line: { width: 3, color: "#111" } }));
+    const modeHe = feeMode === "gross" ? " · ברוטו מדמי ניהול" : "";
+    Plotly.react("chAll", tr, LAYOUT(`כל הסקטורים מול השוק — ${RANGE_HE[range]} (מ-${dateHe(first)})${modeHe}`, "100 = תחילת הטווח"), CFG());
     });
   }
 
@@ -398,6 +494,7 @@
         <div class="corr-row"><span class="lbl">תקופה:</span>${seg("cPer", Object.keys(PER_HE).map(k => [k, PER_HE[k]]), CORR.per)}</div>
         <div class="corr-row" id="cWinRow"><span class="lbl">חלון מתגלגל:</span>${seg("cWin", WIN_OPTS[CORR.freq].map(w => [w, CORR.freq === "W" ? `${w} שבועות` : `${w} ימי מסחר`]), CORR.win[CORR.freq])}</div>
         <label class="corr-row" id="cNormRow"><input type="checkbox" id="cNorm" ${CORR.norm ? "checked" : ""}> הצג גם מחירים מנורמלים (100 = תחילת התקופה)</label>
+        <div class="corr-row" id="cFeeRow" style="display:none">${feeToggleHtml("corr")}</div>
       </div>
       <div class="corr-pick"><div class="corr-row"><span class="lbl">השוואה מול:</span>
         <button type="button" class="qk" data-q="all">בחר הכל</button><button type="button" class="qk" data-q="none">נקה</button>
@@ -415,6 +512,7 @@
     bindSeg("cPer", v => CORR.per = v);
     bindSeg("cWin", v => CORR.win[CORR.freq] = +v);
     $("#cNorm").onchange = e => { CORR.norm = e.target.checked; corrDraw(D); };
+    bindFeeToggles(box);
     box.querySelectorAll(".chip").forEach(b => b.onclick = () => { const id = b.dataset.id; sel.has(id) ? sel.delete(id) : sel.add(id); b.classList.toggle("on", sel.has(id)); b.setAttribute("aria-pressed", sel.has(id)); corrDraw(D); });
     box.querySelectorAll(".qk").forEach(b => b.onclick = () => {
       const q = b.dataset.q, ok = others.filter(m => !m.excluded);
@@ -475,12 +573,28 @@
       if (CORR.norm) {
         elP.style.display = "";
         const u = R.unit, px = [{ m: me, L: A, c: "#111", w: 2.6 }].concat(rows.map(o => ({ m: o.m, L: o.B, c: COLORS[o.i % COLORS.length], w: 1.6 })));
+        const anyFee = px.some(o => o.m.expense_ratio && o.m.expense_ratio.pct != null);
+        const feeRow = $("#cFeeRow"); if (feeRow) feeRow.style.display = anyFee ? "" : "none";
         const tp = px.map(o => {
-          const lv = o.L.lv, x = [], y = []; let base = null;
-          for (let i = 0; i < lv.length; i++) { if (R.dates[i] < start || isNaN(lv[i])) continue; if (base == null) base = lv[i]; x.push(R.dates[i]); y.push(+(100 * Math.exp((lv[i] - base) * u)).toFixed(2)); }
-          return { x, y, type: "scatter", mode: "lines", name: bidi(o.m.name_he), line: { width: o.w, color: o.c }, connectgaps: true };
+          const lv = o.L.lv, x = [], y = []; let base = null, t0ms = null;
+          const er = (o.m.expense_ratio && o.m.expense_ratio.pct != null && feeMode === "gross") ? o.m.expense_ratio.pct / 100 : 0;
+          for (let i = 0; i < lv.length; i++) {
+            if (R.dates[i] < start || isNaN(lv[i])) continue;
+            if (base == null) { base = lv[i]; t0ms = Date.parse(R.dates[i] + "T00:00:00Z"); }
+            let pxv = 100 * Math.exp((lv[i] - base) * u);
+            if (er) {
+              const days = (Date.parse(R.dates[i] + "T00:00:00Z") - t0ms) / 864e5;
+              pxv *= Math.pow(1 + er, days / 365);
+            }
+            x.push(R.dates[i]); y.push(+pxv.toFixed(2));
+          }
+          const nm = o.m.name_he + (er ? " (ברוטו)" : "");
+          return { x, y, type: "scatter", mode: "lines", name: bidi(nm), line: { width: o.w, color: o.c }, connectgaps: true };
         });
-        Plotly.react(elP, tp, LAYOUT(`מחירים מנורמלים ${ccyHe} — ${PER_HE[CORR.per]} (100 = תחילת התקופה)`, "100 = תחילת התקופה"), CFG());
+        const modeHe = feeMode === "gross" && anyFee ? " · ברוטו מדמי ניהול" : "";
+        Plotly.react(elP, tp, LAYOUT(`מחירים מנורמלים ${ccyHe} — ${PER_HE[CORR.per]} (100 = תחילת התקופה)${modeHe}`, "100 = תחילת התקופה"), CFG());
+      } else {
+        const feeRow = $("#cFeeRow"); if (feeRow) feeRow.style.display = "none";
       }
     } else {
       elH.style.display = "";
@@ -522,7 +636,7 @@
   function corrMethod() {
     return `<ul class="gaps">
       <li><b>מה נמדד:</b> מתאם פירסון בין <b>תשואות לוגריתמיות</b> (ln של היחס בין מחירי סגירה עוקבים) — לא בין רמות מחיר. מתאם בין רמות מחיר של סדרות עם מגמה יוצא גבוה גם כשאין קשר בין התנודות (מתאם מדומה).</li>
-      <li><b>סדרה:</b> הסדרה הראשית של כל שוק — המדד המוביל, או קרן הסל המייצגת כשהמדד אינו זמין (מסומן ⚠). מחירי סגירה מותאמים מ-Yahoo Finance, אותם נתונים שבגרף הראשי.</li>
+      <li><b>סדרה:</b> הסדרה הראשית של כל שוק — המדד המוביל, או קרן הסל המייצגת כשהמדד אינו זמין (מסומן ⚠). מחירי סגירה מותאמים מ-Yahoo Finance, אותם נתונים שבגרף הראשי. דמי ניהול של קרן סל כבר מגולמים במחיר; במחירי המנורמלים אפשר להציג גם ברוטו (הוספת דמי הניהול בחזרה).</li>
       <li><b>יישור תאריכים:</b> לכל זוג שווקים נלקחות רק תצפיות שבהן <b>שני</b> השווקים נסחרו, והתשואה מחושבת בין שתי תצפיות משותפות עוקבות. כך חגים וימי מסחר שונים אינם יוצרים תשואות אפס מלאכותיות. במפת החום כל תא מחושב על הזוג שלו (pairwise), ולכן מספר התצפיות N עשוי להשתנות מתא לתא.</li>
       <li><b>שבועי (ברירת מחדל) או יומי:</b> שבועי = מחיר הסגירה האחרון בכל שבוע (שבוע המסתיים ביום שישי; מסחר בשבת/ראשון נספר לשבוע שאחריו). מתאם יומי בין שווקים באזורי זמן שונים (אסיה / אירופה / אמריקה) מוטה כלפי מטה, כי הבורסות אינן נסגרות באותה שעה; התשואות השבועיות מקטינות את ההטיה הזו.</li>
       <li><b>בסיס מטבע:</b> דולר (ברירת מחדל) — כל הסדרות מומרות לדולר (המדד ÷ שער החליפין מול הדולר, Yahoo Finance), כך שכולן נמדדות באותה יחידה; המתאם כולל את השפעת שערי החליפין. מטבע מקומי — כל מדד במטבע שלו; שווקים שמיוצגים בקרן סל דולרית נשארים בדולר.</li>

@@ -48,6 +48,7 @@ def check_data():
         print(f"[{mid}] {kb:6.0f} KB  main={d['index']['ticker'] if d.get('index') else None} points={n} "
               f"sectors={len(items)} charts={sum(1 for s in items if s.get('chart'))} weights={wsum:.1f}% gaps={len(d.get('gaps', []))}{flag}")
     bad += check_returns(ids)
+    bad += check_fees(ids)
     tot = sum(os.path.getsize(f) for f in glob.glob(os.path.join(ROOT, "data", "*.json")))
     print(f"data/*.json total {tot/1024:.0f} KB for {len(ids)} markets")
     return bad, ids
@@ -104,6 +105,48 @@ def check_returns(ids):
     if kb > MAX_RETURNS_KB: print(f"[returns] {kb:.0f} KB > {MAX_RETURNS_KB} KB"); bad += 1
     print(f"[returns] {kb:.0f} KB (gzip ~{len(__import__('gzip').compress(raw.encode()))/1024:.0f} KB), {G} calendar days "
           f"{R['grid']['d0']}..; {len(inc)} markets, excluded={exc}, flagged={sorted(flagged)}")
+    return bad
+
+
+def check_fees(ids):
+    """Every configured ETF should have an expense_ratio entry; pct may be null (= לא זמין)."""
+    bad = 0
+    catalog_p = os.path.join(ROOT, "data", "etf_fees.json")
+    if not os.path.exists(catalog_p):
+        print("[fees] data/etf_fees.json missing"); return 1
+    cat = json.load(open(catalog_p, encoding="utf-8"))
+    fees = cat.get("fees") or {}
+    ok = sum(1 for v in fees.values() if isinstance(v.get("pct"), (int, float)))
+    na = sum(1 for v in fees.values() if v.get("pct") is None)
+    print(f"[fees] catalog {len(fees)} ETFs, {ok} with fee, {na} unavailable")
+    if ok < 30:
+        print("[fees] expected at least ~30 known fees"); bad += 1
+    # spot-check a few known published values (tolerance for issuer updates)
+    expect = {"EWZ": (0.50, 0.70), "IVV": (0.02, 0.05), "XLK": (0.05, 0.12), "ARGT": (0.50, 0.70)}
+    for tkr, (lo, hi) in expect.items():
+        pct = (fees.get(tkr) or {}).get("pct")
+        if pct is None or not (lo <= pct <= hi):
+            print(f"[fees] {tkr} unexpected pct={pct} (want {lo}-{hi})"); bad += 1
+        else:
+            print(f"[fees] {tkr}={pct}% from {(fees.get(tkr) or {}).get('source')}")
+    for mid in ids:
+        d = json.load(open(os.path.join(ROOT, "data", f"{mid}.json"), encoding="utf-8"))
+        ix = d.get("index") or {}
+        if ix.get("kind") == "etf" and "expense_ratio" not in ix:
+            print(f"[fees] {mid}: index ETF missing expense_ratio"); bad += 1
+        for e in d.get("extra_series") or []:
+            if e.get("kind") == "etf" or (e.get("label") or "").startswith("קרן סל"):
+                if "expense_ratio" not in e and e.get("ticker") and " USD" not in e.get("ticker", ""):
+                    print(f"[fees] {mid}: extra {e.get('ticker')} missing expense_ratio"); bad += 1
+        for it in (d.get("sectors") or {}).get("items") or []:
+            ch = it.get("chart") or {}
+            if ch.get("kind") == "etf" and "expense_ratio" not in ch:
+                print(f"[fees] {mid}: sector ETF {ch.get('ticker')} missing expense_ratio"); bad += 1
+    # app.js must expose the fee toggle helpers
+    app = open(os.path.join(ROOT, "assets", "app.js"), encoding="utf-8").read()
+    for tok in ("grossUp", "feeToggleHtml", "feeMode", "feeLabel"):
+        if tok not in app:
+            print(f"[fees] assets/app.js missing {tok}"); bad += 1
     return bad
 
 def privacy_gate(extra=()):

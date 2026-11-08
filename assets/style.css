@@ -126,3 +126,14 @@ details.method summary{cursor:pointer;color:var(--acc);font-weight:600;min-heigh
 .heat-scroll{overflow-x:auto;-webkit-overflow-scrolling:touch;max-width:100%}
 .heat-hint{font-size:.85em;margin:4px 0 0}
 .heat-hint[hidden]{display:none}
+
+/* ---- ETF expense-ratio toggle ---- */
+.fee-ctl{margin:8px 0}
+.fee-ctl .lbl{font-size:13.5px;color:var(--muted);font-weight:600;margin-inline-end:8px}
+.fee-note{font-size:13px;margin:8px 0}
+.fee-seg{flex-wrap:wrap}
+@media (max-width:700px){
+  .fee-ctl{flex-direction:column;align-items:stretch}
+  .fee-seg{display:flex;width:100%}
+  .fee-seg button{flex:1 1 0;font-size:13px;min-height:40px;padding:6px 8px;white-space:normal;line-height:1.25}
+}
