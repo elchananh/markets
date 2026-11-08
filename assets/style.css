@@ -137,3 +137,7 @@ details.method summary{cursor:pointer;color:var(--acc);font-weight:600;min-heigh
   .fee-seg{display:flex;width:100%}
   .fee-seg button{flex:1 1 0;font-size:13px;min-height:40px;padding:6px 8px;white-space:normal;line-height:1.25}
 }
+
+/* ---- currency (FX) section ---- */
+#s-fx .chips{margin-top:6px}
+#chFxIdx{margin-top:10px}

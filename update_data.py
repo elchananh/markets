@@ -8,6 +8,7 @@ Usage:
     python3 update_data.py --no-fundamentals  # skip per-stock Yahoo .info calls (faster)
     python3 update_data.py --build-only       # no downloads: re-compact existing data/*.json and rebuild data/markets.json
     python3 update_data.py --fees-only        # refresh ETF expense ratios and inject into existing data/*.json
+    python3 update_data.py --fx-only          # rebuild shared data/fx.json (currency section) only
     python3 update_data.py --standalone       # also build markets_standalone.html (single offline file, large; not deployed)
 
 Writes:
@@ -394,7 +395,7 @@ def build_market(mid, cfg, do_fund, info_cache):
     log("market", mid)
     gaps, fetched_at = [], now_iso()
     D = {"id": mid, "name_he": cfg["name_he"], "flag": cfg.get("flag", ""), "region_he": cfg.get("region_he", ""),
-         "currency": cfg["currency"], "generated_at": fetched_at, "index_note": cfg.get("index_note")}
+         "currency": cfg["currency"], "fx_ccy": market_fx_ccy(cfg), "fx_ccy_he": FX_NAMES_HE.get(market_fx_ccy(cfg), market_fx_ccy(cfg)), "generated_at": fetched_at, "index_note": cfg.get("index_note")}
 
     # ---- sector source
     ss = cfg.get("sector_source") or {}
@@ -906,6 +907,103 @@ def build_returns(ids):
         sum(1 for m in metas if not m.get("excluded")), "markets")
     return out
 
+
+# ================================================================ shared FX catalog (data/fx.json)
+# Yahoo XXX=X = units of XXX per 1 USD. Cross rates: L per 1 B = (L/USD)/(B/USD).
+# Currency STRENGTH of L vs B = (B/USD)/(L/USD) = units of B per 1 L; a RISE means L is stronger.
+FX_BASES = ["USD", "ILS", "EUR", "GBP", "JPY", "CHF", "CNY"]
+FX_NAMES_HE = {
+    "USD": "דולר אמריקאי", "ILS": "שקל חדש", "EUR": "אירו", "GBP": "לירה שטרלינג",
+    "JPY": "ין יפני", "CHF": "פרנק שוויצרי", "CNY": "יואן סיני",
+    "BRL": "ריאל ברזילאי", "MXN": "פסו מקסיקני", "ARS": "פסו ארגנטינאי", "CLP": "פסו צ'יליאני",
+    "COP": "פסו קולומביאני", "PEN": "סול פרואני", "TWD": "דולר טייוואני", "KRW": "וון קוריאני",
+    "INR": "רופי הודי", "HKD": "דולר הונג קונגי", "SGD": "דולר סינגפורי", "THB": "בהט תאילנדי",
+    "KZT": "טנגה קזחי", "AUD": "דולר אוסטרלי", "PLN": "זלוטי פולני",
+}
+
+def market_fx_ccy(cfg):
+    """Currency shown in the FX section for this market (country currency; USD for USD-quoted markets)."""
+    if cfg.get("extra_fx"):
+        return cfg["extra_fx"].replace("=X", "")
+    c = cfg.get("currency")
+    return c if c else "USD"
+
+def all_fx_tickers():
+    ccys = set(FX_BASES)
+    for cfg in MARKETS.values():
+        ccys.add(market_fx_ccy(cfg))
+        if cfg.get("currency"):
+            ccys.add(cfg["currency"])
+        if cfg.get("extra_fx"):
+            ccys.add(cfg["extra_fx"].replace("=X", ""))
+    ccys.discard("USD")
+    return sorted(ccys)
+
+def build_fx():
+    """Shared data/fx.json: compact XXX=X series (units of XXX per 1 USD) for all market + base currencies."""
+    fetched_at = now_iso()
+    ccys = all_fx_tickers()
+    tickers = [f"{c}=X" for c in ccys]
+    log("FX downloading", len(tickers), "pairs:", ", ".join(tickers))
+    closes = download_closes(tickers, "max")
+    rates = {}
+    gaps = []
+    for c in ccys:
+        t = f"{c}=X"
+        s = closes.get(t)
+        if s is None or len(s) < 30:
+            gaps.append(f"אין היסטוריית שער ל-{t} ב-Yahoo Finance")
+            rates[c] = {"ticker": t, "name_he": FX_NAMES_HE.get(c, c), "series": None, "returns": {},
+                        "source": "Yahoo Finance (yfinance)", "fetched_at": fetched_at, "missing": True}
+            continue
+        rates[c] = {"ticker": t, "name_he": FX_NAMES_HE.get(c, c),
+                    "series": ser_to_json(s, 6), "returns": ret_table(s),
+                    "source": "Yahoo Finance (yfinance) — יחידות מטבע ל-1 דולר (XXX=X)",
+                    "fetched_at": fetched_at, "missing": False}
+    # per-market annotation: which local currency the FX section uses
+    market_ccy = {mid: market_fx_ccy(cfg) for mid, cfg in MARKETS.items()}
+    out = {"generated_at": fetched_at,
+           "source": "Yahoo Finance (yfinance). XXX=X = כמה יחידות של המטבע ל-1 דולר אמריקאי. שער צולב L מול B = (L/USD)÷(B/USD). חוזק L מול B = (B/USD)÷(L/USD) — עלייה = L מתחזק.",
+           "bases": FX_BASES,
+           "names_he": {c: FX_NAMES_HE.get(c, c) for c in sorted(set(FX_BASES) | set(ccys) | {"USD"})},
+           "market_ccy": market_ccy,
+           "rates": rates,
+           "gaps": gaps}
+    # Keep only the last 5 years of daily FX (no older weekly) so the shared file stays under 500 KB.
+    def thin_fx_series(c):
+        if not c or not c.get("v"):
+            return c
+        days = np.cumsum(np.asarray(c["dd"], dtype=np.int64))
+        idx = pd.Timestamp(c["d0"]) + pd.to_timedelta(days, unit="D")
+        cut = idx[-1] - pd.DateOffset(years=5, months=1)
+        keep = np.flatnonzero(idx >= cut)
+        if keep.size < 30:
+            keep = np.arange(len(c["v"]))
+        kd = days[keep]
+        return {"d0": (pd.Timestamp(c["d0"]) + pd.Timedelta(days=int(kd[0]))).strftime("%Y-%m-%d"),
+                "dd": [int(x) for x in np.diff(kd - kd[0], prepend=0)],
+                "v": [round(float(c["v"][i]), 6) for i in keep]}
+    for c, rec in rates.items():
+        if rec.get("series"):
+            rec["series"] = thin_fx_series(rec["series"])
+    out = clean_nan(out)
+    open(data_path("fx.json"), "w", encoding="utf-8").write(js_dump(out))
+    kb = os.path.getsize(data_path("fx.json")) / 1024
+    log("fx.json", f"{kb:.0f} KB,", len(rates), "currencies,",
+        sum(1 for v in rates.values() if not v.get("missing")), "ok,",
+        sum(1 for v in rates.values() if v.get("missing")), "missing")
+    if kb > 500:
+        log("WARNING fx.json exceeds 500 KB")
+    # stamp market JSON with fx_ccy (lightweight annotation; does not rewrite series)
+    for mid, cfg in MARKETS.items():
+        D = load_previous(mid)
+        if not D:
+            continue
+        D["fx_ccy"] = market_fx_ccy(cfg)
+        D["fx_ccy_he"] = FX_NAMES_HE.get(D["fx_ccy"], D["fx_ccy"])
+        write_outputs(mid, D)
+    return out
+
 def build_standalone(ids, out_name):
     """Optional single-file build (everything inlined). Large; meant for desktop/offline use, not deployed."""
     html = open(os.path.join(ROOT, "index.html"), encoding="utf-8").read()
@@ -928,6 +1026,11 @@ def main():
     ids = args or list(MARKETS)
     os.makedirs(os.path.join(ROOT, "data"), exist_ok=True)
     failures = 0
+    if "--fx-only" in sys.argv:
+        build_fx()
+        avail = write_index()
+        log("markets with data:", len(avail))
+        return 0
     if "--fees-only" in sys.argv:
         # Refresh expense ratios and inject into existing market JSON without re-downloading prices.
         fees = fetch_expense_ratios(force=True)
@@ -967,6 +1070,12 @@ def main():
     avail = write_index()
     log("markets with data:", len(avail))
     build_returns(avail)
+    if "--fees-only" not in sys.argv:
+        try:
+            build_fx()
+        except Exception:
+            failures += 1
+            traceback.print_exc()
     if "--standalone" in sys.argv:
         build_standalone(avail, "markets_standalone.html")
     if "--per-market-standalone" in sys.argv:

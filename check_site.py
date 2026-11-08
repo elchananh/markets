@@ -49,6 +49,7 @@ def check_data():
               f"sectors={len(items)} charts={sum(1 for s in items if s.get('chart'))} weights={wsum:.1f}% gaps={len(d.get('gaps', []))}{flag}")
     bad += check_returns(ids)
     bad += check_fees(ids)
+    bad += check_fx()
     tot = sum(os.path.getsize(f) for f in glob.glob(os.path.join(ROOT, "data", "*.json")))
     print(f"data/*.json total {tot/1024:.0f} KB for {len(ids)} markets")
     return bad, ids
@@ -107,6 +108,40 @@ def check_returns(ids):
           f"{R['grid']['d0']}..; {len(inc)} markets, excluded={exc}, flagged={sorted(flagged)}")
     return bad
 
+
+
+def check_fx():
+    """Shared data/fx.json: bases present, series sane, under size cap."""
+    p = os.path.join(ROOT, "data", "fx.json")
+    if not os.path.exists(p):
+        print("[fx] data/fx.json missing"); return 1
+    raw = open(p, encoding="utf-8").read(); kb = len(raw.encode()) / 1024
+    bad = 0
+    try:
+        F = json.loads(raw)
+    except Exception as e:
+        print("[fx] INVALID JSON", e); return 1
+    if kb > MAX_JSON_KB:
+        print(f"[fx] {kb:.0f} KB > {MAX_JSON_KB} KB"); bad += 1
+    for b in ("USD", "ILS", "EUR", "GBP", "JPY", "CHF", "CNY"):
+        if b not in F.get("bases", []):
+            print(f"[fx] missing base {b}"); bad += 1
+    rates = F.get("rates") or {}
+    ok = sum(1 for v in rates.values() if v.get("series") and not v.get("missing"))
+    print(f"[fx] {kb:.0f} KB, {ok}/{len(rates)} currencies with series, bases={F.get('bases')}")
+    # sanity: ILS and BRL last values in plausible bands (as of 2026)
+    for ccy, lo, hi in (("ILS", 2.5, 5.0), ("BRL", 3.0, 8.0), ("EUR", 0.6, 1.3)):
+        r = (rates.get(ccy) or {}).get("returns") or {}
+        last = r.get("last")
+        if last is None or not (lo <= last <= hi):
+            print(f"[fx] {ccy} last={last} outside [{lo},{hi}]"); bad += 1
+        else:
+            print(f"[fx] {ccy}={last} on {r.get('last_date')} from {(rates.get(ccy) or {}).get('source','')[:40]}")
+    app = open(os.path.join(ROOT, "assets", "app.js"), encoding="utf-8").read()
+    for tok in ("fxSection", "fxStrengthSeries", "fxRateSeries", "s-fx"):
+        if tok not in app:
+            print(f"[fx] assets/app.js missing {tok}"); bad += 1
+    return bad
 
 def check_fees(ids):
     """Every configured ETF should have an expense_ratio entry; pct may be null (= לא זמין)."""

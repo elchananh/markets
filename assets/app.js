@@ -183,7 +183,7 @@
       <div id="liveBanner" class="live ${D._live ? D._live.cls : "pending"}">${D._live ? D._live.html : "מרענן נתוני מחירים חיים…"}</div>
       ${D.index_note ? `<p class="note">${esc(D.index_note)}</p>` : ""}
       <p class="muted" style="font-size:13px">הערת מטבע: המדד המקומי מוצג במטבע ${esc(D.currency)}; קרנות סל אמריקאיות, גרפי הסקטורים וההשוואה ביניהם מוצגים בדולר (USD), ולכן כוללים את השפעת שער החליפין. מחירי Yahoo "מותאמים" (כוללים התאמת דיבידנדים/פיצולים). דמי ניהול של תעודות סל כבר מגולמים במחיר. הנקודה האחרונה עשויה להיות תוך-יומית.</p>
-      <div class="toc"><a href="#s-main">מדד מוביל</a><a href="#s-pie">התפלגות סקטורים</a><a href="#s-sectors">סקטורים</a><a href="#s-all">כל הסקטורים יחד</a><a href="#s-corr">מתאם עם שווקים אחרים</a><a href="#s-src">מקורות ופערים</a></div></section>`;
+      <div class="toc"><a href="#s-main">מדד מוביל</a><a href="#s-fx">מטבע</a><a href="#s-pie">התפלגות סקטורים</a><a href="#s-sectors">סקטורים</a><a href="#s-all">כל הסקטורים יחד</a><a href="#s-corr">מתאם עם שווקים אחרים</a><a href="#s-src">מקורות ופערים</a></div></section>`;
 
     // main chart
     const L = seriesList(D);
@@ -243,10 +243,13 @@
     h += `<section class="card" id="s-all"><h2>כל הסקטורים יחד מול השוק (מנורמל ל-100, USD)</h2>${eqItems.some(s => s.chart) && D.market_usd && D.market_usd.series ? `${allHasEtfFee ? feeToggleHtml("all") + feeNote() : ""}<div id="chAll" class="chart" style="height:480px"></div>
       <div class="src">סקטורים = ${D.sectors.items.some(s => s.chart && s.chart.kind === "etf") ? "קרנות סקטור" : "סלי פרוקסי מחושבים (ראו שיטה בכל סקטור)"}; קו השוק = ${esc(D.market_usd.label)}. כולם בדולר. לחיצה על פריט במקרא מסתירה/מציגה אותו.${allHasEtfFee ? " במצב ברוטו מתווספים דמי הניהול של קרנות הסקטור בלבד (למדד/שוק אין דמי ניהול)." : ""}</div>` : `<p>${NA}</p>`}</section>`;
 
+    h += fxSection(D);
+
     h += corrSection(D);
 
     const srcs = [];
     srcs.push("<li>מחירים, מדדים ושערי חליפין: Yahoo Finance דרך yfinance (מחירי סגירה מותאמים).</li>");
+    srcs.push("<li>שערי חליפין: Yahoo Finance (XXX=X = יחידות מטבע ל-1 דולר); שערים צולבים וחוזק מטבע מחושבים בצד הלקוח דרך הדולר. קובץ משותף data/fx.json.</li>");
     srcs.push("<li>דמי ניהול של תעודות סל: iShares product screener (fees/TER), עמודי Global X, או Yahoo Finance netExpenseRatio — כבר מגולמים במחיר/NAV; מוצגים ליד כל קרן. ערך שלא נמצא = לא זמין.</li>");
     if (sec) {
       srcs.push(`<li>משקלי סקטורים: ${link(sec.url, sec.url)} (נכון ל-${esc(sec.as_of)}).</li>`);
@@ -263,6 +266,7 @@
     if ($("#mainSel")) { $("#mainSel").onchange = drawMain; $("#mainNorm").onchange = drawMain; }
     bindFeeToggles($("#app"));
     drawAll();
+    fxSetup(D);
     corrSetup(D);
     if (!D._live && !D._liveRunning) liveRefresh(D);
   }
@@ -365,9 +369,257 @@
     if (!current) return;
     const l = $("#rangeLbl"); if (l) l.textContent = RANGE_HE[range];
     drawMain(); drawPie(); drawSectors(); drawCombined();
+    if (FX.data) fxDraw(current);
     document.body.setAttribute("data-rendered", current.id);
   }
 
+
+
+  // ================================================================ currency section (data/fx.json)
+  // Yahoo XXX=X = units of XXX per 1 USD. Strength of local L vs base B = (B/USD)/(L/USD) — RISE = L stronger.
+  const FX = { data: null, loading: null, err: null, selBy: {}, showIdx: true };
+  const FX_BASE_ORDER = ["USD", "ILS", "EUR", "GBP", "JPY", "CHF", "CNY"];
+  function fxLoad() {
+    if (FX.data) return Promise.resolve(FX.data);
+    if (!FX.loading) FX.loading = fetch("data/fx.json", { cache: "no-cache" })
+      .then(r => { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
+      .then(F => { FX.data = F; return F; })
+      .catch(e => { FX.loading = null; FX.err = String(e && e.message || e); throw e; });
+    return FX.loading;
+  }
+  function fxLocal(D) {
+    return (D && (D.fx_ccy || D.currency)) || "USD";
+  }
+  function fxName(ccy) {
+    return (FX.data && FX.data.names_he && FX.data.names_he[ccy]) || ccy;
+  }
+  function fxUsdSeries(ccy) {
+    // returns decoded {d,v} of units-of-ccy per 1 USD; USD -> synthetic 1.0 on a dense calendar from any rate
+    if (ccy === "USD") return null;
+    const rec = FX.data && FX.data.rates && FX.data.rates[ccy];
+    if (!rec || !rec.series) return null;
+    return S(rec.series);
+  }
+  function fxAlign(a, b) {
+    // pairwise align two {d,v} series on common dates
+    if (!a || !b) return { d: [], av: [], bv: [] };
+    const mb = new Map(b.d.map((d, i) => [d, b.v[i]]));
+    const d = [], av = [], bv = [];
+    for (let i = 0; i < a.d.length; i++) {
+      if (!mb.has(a.d[i])) continue;
+      const x = a.v[i], y = mb.get(a.d[i]);
+      if (!(x > 0 && y > 0)) continue;
+      d.push(a.d[i]); av.push(x); bv.push(y);
+    }
+    return { d, av, bv };
+  }
+  function fxStrengthSeries(local, base) {
+    // units of base per 1 local; rise = local stronger
+    if (local === base) return null;
+    if (local === "USD") {
+      const b = fxUsdSeries(base); if (!b) return null;
+      return { d: b.d.slice(), v: b.v.map(x => +(1 / x).toPrecision(8)), label: `${fxName(local)} מול ${fxName(base)}` };
+    }
+    if (base === "USD") {
+      const l = fxUsdSeries(local); if (!l) return null;
+      return { d: l.d.slice(), v: l.v.map(x => +(1 / x).toPrecision(8)), label: `${fxName(local)} מול ${fxName(base)}` };
+    }
+    const L = fxUsdSeries(local), B = fxUsdSeries(base);
+    if (!L || !B) return null;
+    const al = fxAlign(L, B);
+    return { d: al.d, v: al.av.map((lv, i) => +(al.bv[i] / lv).toPrecision(8)), label: `${fxName(local)} מול ${fxName(base)}` };
+  }
+  function fxRateSeries(local, base) {
+    // units of local per 1 base (conventional Yahoo-style quote of local)
+    if (local === base) return null;
+    if (base === "USD") {
+      const l = fxUsdSeries(local); if (!l) return null;
+      return { d: l.d.slice(), v: l.v.slice(), label: `${local} ל-1 ${base}` };
+    }
+    if (local === "USD") {
+      const b = fxUsdSeries(base); if (!b) return null;
+      return { d: b.d.slice(), v: b.v.map(x => +(1 / x).toPrecision(8)), label: `${local} ל-1 ${base}` };
+    }
+    const L = fxUsdSeries(local), B = fxUsdSeries(base);
+    if (!L || !B) return null;
+    const al = fxAlign(L, B);
+    return { d: al.d, v: al.av.map((lv, i) => +(lv / al.bv[i]).toPrecision(8)), label: `${local} ל-1 ${base}` };
+  }
+  function fxRetFromSeries(s) {
+    if (!s || !s.d.length) return {};
+    return retTable(s);
+  }
+  function fxDefaultBases(local) {
+    if (local === "USD") return new Set(["ILS", "EUR"]);
+    return new Set(["USD"]);
+  }
+  function fxSection(D) {
+    return `<section class="card" id="s-fx"><h2>מטבע — ${esc(D.fx_ccy_he || fxName(fxLocal(D)))} (${esc(fxLocal(D))})</h2>
+      <div id="fxBody"><p class="muted">טוען שערי חליפין…</p></div></section>`;
+  }
+  function fxSetup(D) {
+    const box = $("#fxBody"); if (!box) return;
+    fxLoad().then(F => {
+      if (current !== D) return;
+      // live-refresh USD pairs used by this market (local + all bases)
+      fxLiveRefresh(D).finally(() => { if (current === D) fxUI(D); });
+    }).catch(e => {
+      if ($("#fxBody")) $("#fxBody").innerHTML = `<p class="na">שערי חליפין לא זמינים (${esc(e.message || e)}).</p>`;
+    });
+  }
+  async function fxLiveRefresh(D) {
+    if (!FX.data) return;
+    const local = fxLocal(D);
+    const want = new Set(FX_BASE_ORDER.filter(c => c !== "USD"));
+    if (local !== "USD") want.add(local);
+    const jobs = [];
+    want.forEach(c => {
+      const rec = FX.data.rates[c];
+      if (rec && rec.series && !rec.missing) jobs.push([rec, rec.ticker]);
+    });
+    if (!jobs.length) return;
+    const syms = [...new Set(jobs.map(j => liveSym(j[1])).filter(Boolean).map(x => x.s))];
+    const quotes = syms.length ? await getQuotes(syms) : {};
+    await Promise.all(jobs.map(([o, t]) => refreshOne(o, t, quotes)));
+  }
+  function fxUI(D) {
+    const box = $("#fxBody"); if (!box || !FX.data) return;
+    const local = fxLocal(D);
+    if (!FX.selBy[D.id]) FX.selBy[D.id] = fxDefaultBases(local);
+    const sel = FX.selBy[D.id];
+    const bases = FX_BASE_ORDER.filter(c => c !== local);
+    const missLocal = local !== "USD" && (!(FX.data.rates[local]) || FX.data.rates[local].missing);
+    let h = "";
+    h += `<p class="note">עלייה בגרף <b>חוזק המטבע</b> = המטבע המקומי (${esc(local)}) מתחזק מול המטבע שנבחר (קונה יותר ממנו). השער הגולמי מציג כמה ${esc(local)} ל-1 יחידה של המטבע הנבחר — שם עלייה = היחלשות של ${esc(local)}. מקור: Yahoo Finance (XXX=X); שערים צולבים מחושבים דרך הדולר בימי מסחר משותפים.</p>`;
+    if (missLocal) h += `<p class="na">אין סדרת שער ל-${esc(local)} — לא ניתן להציג השוואת מטבע.</p>`;
+    h += `<div class="corr-pick"><div class="corr-row"><span class="lbl">השוואה מול:</span>
+      <button type="button" class="qk" data-q="all">בחר הכל</button><button type="button" class="qk" data-q="none">נקה</button>
+      <button type="button" class="qk" data-q="def">ברירת מחדל</button></div>
+      <div class="chips" id="fxChips">${bases.map(c => {
+        const miss = c !== "USD" && (!(FX.data.rates[c]) || FX.data.rates[c].missing);
+        return `<button type="button" class="chip${sel.has(c) ? " on" : ""}" data-ccy="${c}" aria-pressed="${sel.has(c)}" ${miss ? "disabled" : ""}>${esc(c)} — ${esc(fxName(c))}${miss ? " (לא זמין)" : ""}</button>`;
+      }).join("")}</div></div>`;
+    h += `<label class="corr-row" style="margin:8px 0"><input type="checkbox" id="fxShowIdx" ${FX.showIdx ? "checked" : ""}> הצג גם את המדד במטבע המקומי מול המדד במטבע הנבחר (השפעת המטבע)</label>`;
+    h += `<div id="chFxStr" class="chart"></div><div id="chFxRate" class="chart sm"></div><div id="chFxIdx" class="chart" style="display:none"></div>`;
+    h += `<div id="fxTable"></div>`;
+    h += `<div class="src" id="fxSrc"></div>`;
+    box.innerHTML = h;
+    box.querySelectorAll("#fxChips .chip").forEach(b => b.onclick = () => {
+      const c = b.dataset.ccy; sel.has(c) ? sel.delete(c) : sel.add(c);
+      b.classList.toggle("on", sel.has(c)); b.setAttribute("aria-pressed", sel.has(c)); fxDraw(D);
+    });
+    box.querySelectorAll(".qk").forEach(b => b.onclick = () => {
+      const q = b.dataset.q;
+      if (q === "all") bases.forEach(c => { if (!(c !== "USD" && FX.data.rates[c] && FX.data.rates[c].missing)) sel.add(c); });
+      else if (q === "none") sel.clear();
+      else { sel.clear(); fxDefaultBases(local).forEach(c => sel.add(c)); }
+      fxUI(D);
+    });
+    const idxCb = $("#fxShowIdx"); if (idxCb) idxCb.onchange = e => { FX.showIdx = e.target.checked; fxDraw(D); };
+    fxDraw(D);
+  }
+  function fxDraw(D) {
+    if (!FX.data || !$("#chFxStr")) return;
+    const local = fxLocal(D);
+    const sel = FX.selBy[D.id] || fxDefaultBases(local);
+    const chosen = FX_BASE_ORDER.filter(c => sel.has(c) && c !== local);
+    const st = marketStart(D);
+    // strength chart (normalized)
+    const trS = [];
+    chosen.forEach((b, i) => {
+      const s = fxStrengthSeries(local, b); if (!s || !s.d.length) return;
+      const cutS = cut(s, st); if (!cutS.d.length) return;
+      trS.push(line(rebase(cutS), `${local} מול ${b} (חוזק)`, COLORS[i % COLORS.length]));
+    });
+    if (trS.length) Plotly.react("chFxStr", trS, LAYOUT(`חוזק ${local} מול המטבעות שנבחרו — ${RANGE_HE[range]} (עלייה = ${local} מתחזק)`, "100 = תחילת הטווח"), CFG());
+    else { const el = $("#chFxStr"); if (el.classList.contains("js-plotly-plot")) Plotly.purge(el); el.innerHTML = chosen.length ? `<p class="na">אין מספיק נתונים לטווח זה</p>` : `<p class="muted">בחרו לפחות מטבע אחד להשוואה.</p>`; }
+
+    // raw rate chart — primary base (first selected) or USD
+    const primary = chosen[0] || (local === "USD" ? "ILS" : "USD");
+    const rate = fxRateSeries(local, primary);
+    const elR = $("#chFxRate");
+    if (rate && rate.d.length) {
+      const cutR = cut(rate, st);
+      Plotly.react(elR, [line(cutR, rate.label, COLORS[0], { fill: "tozeroy", fillcolor: "rgba(31,111,235,0.06)" })],
+        LAYOUT(`שער: ${local} ל-1 ${primary} — ${RANGE_HE[range]} (עלייה = ${local} נחלש)`, `${local}/${primary}`), CFG());
+    } else {
+      if (elR.classList.contains("js-plotly-plot")) Plotly.purge(elR);
+      elR.innerHTML = `<p class="na">שער גולמי לא זמין</p>`;
+    }
+
+    // index in local vs index in primary base
+    const elI = $("#chFxIdx");
+    if (FX.showIdx && D.index && D.index.series) {
+      elI.style.display = "";
+      const idx = S(D.index.series);
+      const native = D.index.currency || D.currency || "USD";
+      // convert index to local-ccy terms if needed, then to base
+      // index_in_base = index_native * (native→USD) * (USD→base) wait:
+      // native per USD = N; base per USD = B
+      // index in USD = index_native / N (if native!=USD) else index
+      // index in base = index_USD * B
+      function toUsd(series, ccy) {
+        if (ccy === "USD") return series;
+        const fx = fxUsdSeries(ccy); if (!fx) return null;
+        return divideFF(series, fx);
+      }
+      function fromUsd(seriesUsd, ccy) {
+        if (ccy === "USD") return seriesUsd;
+        const fx = fxUsdSeries(ccy); if (!fx) return null;
+        // index_base = index_usd * base_per_usd
+        const al = fxAlign(seriesUsd, fx);
+        return { d: al.d, v: al.av.map((v, i) => +(v * al.bv[i]).toPrecision(8)) };
+      }
+      const idxUsd = toUsd(idx, native);
+      const idxLocal = local === native ? idx : (idxUsd ? fromUsd(idxUsd, local) : null);
+      const idxBase = idxUsd ? fromUsd(idxUsd, primary) : null;
+      const tr = [];
+      let first = null;
+      const parts = [];
+      if (idxLocal) { const c = cut(idxLocal, st); if (c.d.length) { parts.push(["local", c, `${D.index.name_he || "מדד"} (${local})`]); first = c.d[0]; } }
+      if (idxBase) { const c = cut(idxBase, st); if (c.d.length) { parts.push(["base", c, `${D.index.name_he || "מדד"} (${primary})`]); if (!first || c.d[0] > first) first = c.d[0]; } }
+      if (parts.length >= 1 && first) {
+        parts.forEach((p, i) => {
+          const c = cut(p[1], first);
+          tr.push(line(rebase(c), p[2], i === 0 ? COLORS[0] : "#868e96", i === 1 ? { line: { width: 1.6, dash: "dot", color: "#868e96" } } : undefined));
+        });
+        Plotly.react(elI, tr, LAYOUT(`המדד ב-${local} מול המדד ב-${primary} — ${RANGE_HE[range]} (מנורמל; הפער ≈ אפקט המטבע)`, "100 = תחילת הטווח"), CFG());
+      } else {
+        if (elI.classList.contains("js-plotly-plot")) Plotly.purge(elI);
+        elI.innerHTML = `<p class="na">אין מספיק נתונים להצגת המדד במטבעות אלה (ייתכן שהמדד הוא קרן סל דולרית ללא המרה ישירה).</p>`;
+      }
+    } else {
+      elI.style.display = "none";
+      if (elI.classList.contains("js-plotly-plot")) Plotly.purge(elI);
+    }
+
+    // returns table for strength vs each chosen base
+    const rows = chosen.map(b => {
+      const s = fxStrengthSeries(local, b); const r = fxRetFromSeries(s ? cut(s, "1900-01-01") : null);
+      // use full series returns from strength
+      const full = s ? fxRetFromSeries(s) : {};
+      return { b, r: full };
+    });
+    $("#fxTable").innerHTML = `<h3 style="margin-top:12px">שינוי בחוזק ${esc(local)} (עלייה = התחזקות)</h3>
+      <div class="tablewrap"><table><tr><th>מול</th><th>שער אחרון*</th><th>תאריך</th><th>חודש</th><th>YTD</th><th>שנה</th><th>3 שנים</th><th>5 שנים</th></tr>
+      ${rows.map(o => {
+        const rate = fxRateSeries(local, o.b);
+        const rr = rate ? fxRetFromSeries(rate) : {};
+        return `<tr><td>${esc(o.b)} — ${esc(fxName(o.b))}</td><td class="num">${rr.last != null ? fmt(rr.last, 4) : NA}</td><td>${dateHe(rr.last_date || o.r.last_date)}</td>
+          <td class="num">${pct(o.r["1M"])}</td><td class="num">${pct(o.r.YTD)}</td><td class="num">${pct(o.r["1Y"])}</td><td class="num">${pct(o.r["3Y"])}</td><td class="num">${pct(o.r["5Y"])}</td></tr>`;
+      }).join("")}</table></div>
+      <div class="src">* שער אחרון = כמה ${esc(local)} ל-1 יחידה של המטבע הנבחר. אחוזי השינוי = שינוי ב<b>חוזק</b> ${esc(local)} (הופכי לשער).</div>`;
+
+    const liveNotes = [];
+    const srcParts = [];
+    [local, ...chosen].forEach(c => {
+      if (c === "USD") return;
+      const rec = FX.data.rates[c]; if (!rec) return;
+      srcParts.push(`${c}=X`);
+      if (rec._live) liveNotes.push(`${c}: חי · ${rec._live.asof}`);
+    });
+    $("#fxSrc").innerHTML = `מקור שערי הבסיס מול הדולר: Yahoo Finance (${esc(srcParts.join(", "))}). שערים צולבים מחושבים בימי מסחר משותפים. נוצר ${dtHe(FX.data.generated_at)}.${liveNotes.length ? " רענון חי: " + esc(liveNotes.join(" · ")) + "." : ""} ${esc(FX.data.source || "")}`;
+  }
 
   // ================================================================ correlation section (data/returns.json, no live refresh)
   // Pearson correlation of log returns (not price levels). Pairwise alignment: only days/weeks on which BOTH markets have a
@@ -842,7 +1094,7 @@
     load(start);
     // redraw on rotation / crossing the mobile breakpoint (layout differs between phone and desktop)
     let lastMobile = isMobile();
-    window.addEventListener("resize", () => { if (isMobile() !== lastMobile) { lastMobile = isMobile(); drawAll(); if (CORR.data && current && $("#chCorr")) corrDraw(current); } });
+    window.addEventListener("resize", () => { if (isMobile() !== lastMobile) { lastMobile = isMobile(); drawAll(); if (CORR.data && current && $("#chCorr")) corrDraw(current); if (FX.data && current && $("#chFxStr")) fxDraw(current); } });
   }
   document.addEventListener("DOMContentLoaded", init);
   // offline support (app shell + last viewed markets); only over http(s) and not in the single-file build
